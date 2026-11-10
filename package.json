@@ -8,8 +8,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win --publish never",
-    "release": "electron-builder --win --publish always"
+    "dist": "electron-builder --win --publish never"
   },
   "dependencies": {
     "electron-updater": "^6.8.11"
@@ -31,7 +30,8 @@
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "shortcutName": "EyePhoto"
+      "shortcutName": "EyePhoto",
+      "artifactName": "EyePhoto-Setup-${version}.${ext}"
     },
     "publish": {
       "provider": "github",

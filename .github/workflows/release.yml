@@ -42,6 +42,22 @@ jobs:
         if: steps.ver.outputs.exists == 'false'
         run: npm ci
 
-      - name: Собрать и опубликовать
+      - name: Собрать установщик
         if: steps.ver.outputs.exists == 'false'
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win --publish never
+
+      # Релиз создаём сами: тег ставится на тот коммит, из которого собрано.
+      # latest.yml нужен установленным копиям, чтобы увидеть новую версию.
+      - name: Опубликовать релиз
+        if: steps.ver.outputs.exists == 'false'
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          gh release create "v$V" \
+            "dist/EyePhoto-Setup-$V.exe" \
+            "dist/EyePhoto-Setup-$V.exe.blockmap" \
+            dist/latest.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "EyePhoto $V" \
+            --notes "Версия $V"

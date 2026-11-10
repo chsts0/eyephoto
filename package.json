@@ -1,7 +1,7 @@
 {
   "name": "eyephoto",
   "productName": "EyePhoto",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Редактор снимков радужки для студии",
   "main": "src/main.js",
   "author": "EyePhoto",
@@ -11,7 +11,9 @@
     "dist": "electron-builder --win --publish never"
   },
   "dependencies": {
-    "electron-updater": "^6.8.11"
+    "electron-updater": "^6.8.11",
+    "libraw-wasm": "^1.6.0",
+    "onnxruntime-node": "^1.31.1"
   },
   "devDependencies": {
     "electron": "^45.2.3",
@@ -21,7 +23,11 @@
     "appId": "ru.eyephoto.app",
     "productName": "EyePhoto",
     "files": [
-      "src/**/*"
+      "src/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
+      "!node_modules/libraw-wasm/dist/*.map"
     ],
     "win": {
       "target": "nsis"
@@ -38,6 +44,9 @@
       "owner": "chsts0",
       "repo": "eyephoto",
       "releaseType": "release"
-    }
+    },
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**"
+    ]
   }
 }

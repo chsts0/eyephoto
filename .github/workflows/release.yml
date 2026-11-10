@@ -38,6 +38,21 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Файл нейронки (200 МБ) лежит в отдельном релизе, программы качают его оттуда
+      # один раз. Кладём его туда при первой сборке, дальше шаг пропускается.
+      - name: Выложить файл нейронки, если его ещё нет
+        shell: bash
+        run: |
+          if ! gh release view models-v1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            curl -fL --retry 3 -o lama_fp32.onnx \
+              https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx
+            gh release create models-v1 lama_fp32.onnx \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Файл нейронки" \
+              --notes "Модель LaMa для ретуши. Не удалять: её скачивают установленные программы."
+            rm lama_fp32.onnx
+          fi
+
       - name: Установить зависимости
         if: steps.ver.outputs.exists == 'false'
         run: npm ci

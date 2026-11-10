@@ -1,0 +1,47 @@
+name: release
+
+# Сборка установщика под Windows и публикация релиза.
+# Срабатывает на каждый пуш в main, но собирает только если версии
+# из package.json ещё нет в релизах. То есть обновление для всех компов =
+# поднять version в package.json и влить в main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Проверить, вышла ли уже эта версия
+        id: ver
+        shell: bash
+        run: |
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Установить зависимости
+        if: steps.ver.outputs.exists == 'false'
+        run: npm ci
+
+      - name: Собрать и опубликовать
+        if: steps.ver.outputs.exists == 'false'
+        run: npx electron-builder --win --publish always

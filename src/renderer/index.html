@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; style-src 'self'">
+  <title>EyePhoto</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"></span>EyePhoto</div>
+    <div class="file-name" id="fileName"></div>
+    <div class="top-actions">
+      <button class="btn" id="openBtn">Открыть снимок</button>
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <canvas id="canvas"></canvas>
+    <div class="empty" id="empty">
+      <div class="empty-ring"></div>
+      <h1>Перетащите снимок сюда</h1>
+      <p>или нажмите «Открыть снимок». Подойдут JPG и PNG.</p>
+      <button class="btn btn-primary" id="openBtn2">Открыть снимок</button>
+    </div>
+    <div class="zoom" id="zoom" hidden>
+      <button class="zoom-btn" id="zoomOut" title="Отдалить">−</button>
+      <button class="zoom-val" id="zoomFit" title="Вписать в окно">100%</button>
+      <button class="zoom-btn" id="zoomIn" title="Приблизить">+</button>
+    </div>
+  </main>
+
+  <footer class="statusbar">
+    <div class="update" id="update">
+      <span class="dot" id="updateDot"></span>
+      <span id="updateText">Проверяю обновления</span>
+      <button class="link" id="updateAction" hidden></button>
+    </div>
+    <div class="meta" id="meta"></div>
+    <div class="version" id="version"></div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

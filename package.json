@@ -1,0 +1,43 @@
+{
+  "name": "eyephoto",
+  "productName": "EyePhoto",
+  "version": "0.1.0",
+  "description": "Редактор снимков радужки для студии",
+  "main": "src/main.js",
+  "author": "EyePhoto",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "ru.eyephoto.app",
+    "productName": "EyePhoto",
+    "files": [
+      "src/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "EyePhoto"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "chsts0",
+      "repo": "eyephoto",
+      "releaseType": "release"
+    }
+  }
+}

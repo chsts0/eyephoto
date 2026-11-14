@@ -47,6 +47,9 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  // Системное меню убираем совсем: иначе на Windows Alt открывал бы его
+  // и мешал фотошоповским сочетаниям с Alt.
+  win.removeMenu();
   win.loadURL('app://local/index.html');
 
   // Не даём случайно закрыть окно с несохранённой работой.

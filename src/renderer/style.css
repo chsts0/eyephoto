@@ -278,3 +278,4 @@ body.no-doc .dock > * { opacity: .35; pointer-events: none; }
 body.bare { grid-template: "center" 1fr / 1fr; }
 body.bare .menubar, body.bare .optbar, body.bare .tools, body.bare .dock, body.bare .status, body.bare .tabs { display: none; }
 body.bare .center { grid-template-rows: 1fr; }
+.opt-label { color: var(--dim); }

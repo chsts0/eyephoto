@@ -26,7 +26,7 @@ const S = {
     stamp: { size: 80, hard: 50, flow: 100 },
     brush: { size: 40, hard: 80, flow: 100, color: '#000000' },
     eraser: { size: 60, hard: 80, flow: 100 },
-    burn: { size: 120, flow: 30, mode: 'burn' },
+    burn: { size: 120, hard: 0, flow: 50, mode: 'burn', range: 'mid', protect: true },
     pupil: { ratio: 23.5 },
   },
   drag: null,
@@ -248,7 +248,11 @@ function drawOverlay() {
   }
 
   const sized = S.opts[S.tool] && S.opts[S.tool].size;
-  if (sized && S.cursor && !(g && g.type === 'pan')) ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 }, '#fff', false);
+  if (sized && S.cursor && !(g && g.type === 'pan') && !(S.ctrl && !g)) {
+    ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 }, '#fff', false);
+    const hd = S.opts[S.tool].hard;
+    if (g && g.type === 'brushsize' && hd != null && hd > 2) ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 * hd / 100 }, 'rgba(255,90,90,.9)', false);
+  }
 }
 
 // Прилипание к направляющим по центру листа.
@@ -1072,15 +1076,15 @@ async function exportAs() {
 // --- Инструменты ------------------------------------------------------------
 
 const TOOLS = [
-  ['move', 'Перемещение', 'V', 'Тяните слой, чтобы подвинуть. Углы рамки меняют размер, снаружи от угла поворот. Shift: шаг 15°'],
+  ['move', 'Перемещение', 'V', 'Щелчок выбирает слой, мимо снимает выбор. Углы рамки: размер, снаружи от угла: поворот. Alt: тащить копию'],
   ['marquee', 'Овальная область', 'M', 'Тяните от центра радужки. Круг потом двигается за середину и меняется за край. Ctrl+J: вырезать на новый слой'],
-  ['lasso', 'Лассо', 'L', 'Обведите блик или ресницу с запасом. Shift: добавить к выделению, Alt: вычесть'],
+  ['lasso', 'Лассо', 'L', 'Каждая обводка добавляется к выделению. Alt: вычесть, щелчок без обводки: снять выделение'],
   '-',
   ['patch', 'Заплатка', 'J', 'Закрасьте лишнее. Нейронка уберёт, когда отпустите мышку'],
   ['stamp', 'Штамп', 'S', 'Alt+щелчок: откуда брать. Потом рисуйте там, куда переносить'],
   ['brush', 'Кисть', 'B', 'Рисует выбранным цветом на активном слое'],
   ['eraser', 'Ластик', 'E', 'Стирает пиксели активного слоя до прозрачности'],
-  ['burn', 'Затемнитель', 'O', 'Каждый проход делает темнее. С Alt осветляет'],
+  ['burn', 'Затемнитель', 'O', 'Темнит только тона из выбранного диапазона. С Alt осветляет'],
   ['pupil', 'Зрачок', 'P', 'Подведите круг к краю зрачка ползунком справа или мышкой за край. Потом «Сузить зрачок» или Enter'],
   '-',
   ['hand', 'Рука', 'H', 'Двигает картинку. То же самое делает пробел с любым инструментом'],
@@ -1241,7 +1245,7 @@ function dab(g, p) {
       x.drawImage(tmp, cx - s / 2, cy - s / 2);
     } else {
       if (g.mode === 'erase') { x.globalCompositeOperation = 'destination-out'; x.fillStyle = grad('0,0,0', flow); }
-      else if (g.mode === 'burn') { x.globalCompositeOperation = 'source-atop'; x.fillStyle = grad(g.dodge ? '255,255,255' : '0,0,0', flow * 0.2); }
+      else if (g.mode === 'burn') { burnPixels(x, cx, cy, rr, hard, flow * 0.12, g.dodge, o.range, o.protect); x.restore(); continue; }
       else {
         const c = o.color;
         x.fillStyle = grad(`${parseInt(c.slice(1, 3), 16)},${parseInt(c.slice(3, 5), 16)},${parseInt(c.slice(5, 7), 16)}`, flow);
@@ -1257,6 +1261,52 @@ function dab(g, p) {
   if (g.srcDelta) g.srcNow = { x: p.x + g.srcDelta.x, y: p.y + g.srcDelta.y };
 }
 
+// Затемнитель и осветлитель как в фотошопе: сила зависит от яркости пикселя.
+// «Средние тона» почти не трогают чёрное и белое, «Тени» работают по тёмному,
+// «Света» по светлому. «Защитить тона» меняет только яркость, оттенок и
+// насыщенность остаются прежними; без защиты цвет в тенях становится гуще.
+const RANGE_W = {
+  shadows: (v) => (1 - v) * (1 - v),
+  mid: (v) => 1 - (2 * v - 1) * (2 * v - 1),
+  highlights: (v) => v * v,
+};
+
+function burnPixels(x, cx, cy, rr, hard, strength, dodge, range, protect) {
+  const W = x.canvas.width, H = x.canvas.height;
+  const x0 = Math.max(0, Math.floor(cx - rr)), y0 = Math.max(0, Math.floor(cy - rr));
+  const x1 = Math.min(W, Math.ceil(cx + rr)), y1 = Math.min(H, Math.ceil(cy + rr));
+  if (x1 <= x0 || y1 <= y0) return;
+  const img = x.getImageData(x0, y0, x1 - x0, y1 - y0), d = img.data, w = x1 - x0;
+  const rw = RANGE_W[range] || RANGE_W.mid;
+  for (let yy = y0; yy < y1; yy++) {
+    for (let xx = x0; xx < x1; xx++) {
+      const dist = Math.hypot(xx + 0.5 - cx, yy + 0.5 - cy) / rr;
+      if (dist >= 1) continue;
+      const i = ((yy - y0) * w + (xx - x0)) * 4;
+      if (d[i + 3] === 0) continue;
+      const t = dist <= hard ? 0 : (dist - hard) / (1 - hard), fall = 1 - t * t * (3 - 2 * t);
+      if (protect) {
+        const L = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255;
+        const a = strength * fall * rw(L);
+        const L2 = dodge ? L + (1 - L) * a : L * (1 - a);
+        if (L > 0.004) {
+          const k = L2 / L;
+          d[i] = d[i] * k; d[i + 1] = d[i + 1] * k; d[i + 2] = d[i + 2] * k;
+        } else {
+          const add = (L2 - L) * 255;
+          d[i] += add; d[i + 1] += add; d[i + 2] += add;
+        }
+      } else {
+        for (let c = 0; c < 3; c++) {
+          const v = d[i + c] / 255, a = strength * fall * rw(v);
+          d[i + c] = (dodge ? v + (1 - v) * a : v * (1 - a)) * 255;
+        }
+      }
+    }
+  }
+  x.putImageData(img, x0, y0);
+}
+
 function strokeTo(g, p) {
   const step = Math.max(1, S.opts[S.tool].size * 0.12);
   const dx = p.x - g.last.x, dy = p.y - g.last.y, dist = Math.hypot(dx, dy);
@@ -1270,6 +1320,7 @@ const STROKE_NAMES = { paint: 'Кисть', erase: 'Ластик', burn: 'Зат
 function endStroke(g) {
   const l = g.layer, b = g.box;
   l.live = false;
+  S.lastPaint = { id: l.id, tool: S.tool, p: g.last };
   const x = Math.max(0, Math.floor(b.x0)), y = Math.max(0, Math.floor(b.y0));
   const w = Math.min(l.canvas.width, Math.ceil(b.x1)) - x, h = Math.min(l.canvas.height, Math.ceil(b.y1)) - y;
   if (w > 0 && h > 0) {
@@ -1300,6 +1351,7 @@ function setCursor(over) {
   let c = over;
   if (!c) {
     if (t === 'hand' || S.space) c = S.drag && S.drag.type === 'pan' ? 'grabbing' : 'grab';
+    else if (S.ctrl && TEMP_MOVE.includes(t)) c = CURSORS.move;
     else if (t === 'zoom') c = S.alt ? CURSORS.zoomOut : CURSORS.zoomIn;
     else if (SIZED.includes(t)) {
       // совсем маленькую кисть кругом не разглядеть, показываем перекрестие
@@ -1334,34 +1386,90 @@ function moveHit(p) {
   return null;
 }
 
+// Ctrl с любым рисующим инструментом временно даёт перемещение, как в фотошопе.
+const TEMP_MOVE = ['marquee', 'lasso', 'patch', 'stamp', 'brush', 'eraser', 'burn', 'pupil'];
+const tempMove = (e) => e.ctrlKey && TEMP_MOVE.includes(S.tool);
+
+// Перемещение. С автовыбором щелчок по глазу выбирает его, щелчок мимо слоёв
+// снимает выбор. Если выбрано несколько слоёв, перетаскивание двигает все,
+// а щелчок без перетаскивания оставляет выбранным один. Alt тащит копию.
+function moveDown(d, p, e) {
+  const o = S.opts.move;
+  const h = !tempMove(e) && moveHit(p);
+  if (h) {
+    const l = h.layer;
+    S.drag = { ...h, commit: D.beginStruct(d), start: p, s0: l.scale, r0: l.rot, c0: { x: l.cx, y: l.cy } };
+    if (h.type === 'scale') S.drag.anchor = D.corners(l)[(h.corner + 2) % 4];
+    return;
+  }
+  const auto = o.auto || tempMove(e);
+  const under = d.layers.slice().reverse().find((l) => D.shown(d, l) && !l.locked && D.hit(l, p));
+  let only = 0;
+  if (auto) {
+    if (!under) {
+      if (!e.shiftKey && d.active.length) { d.active = []; S.pupil = null; refresh(); }
+      return;
+    }
+    if (e.shiftKey) {
+      d.active = d.active.includes(under.id) ? d.active.filter((i) => i !== under.id) : [...d.active, under.id];
+      refresh();
+      if (!d.active.includes(under.id)) return;
+    } else if (!d.active.includes(under.id)) {
+      d.active = [under.id];
+      S.pupil = null;
+      refresh();
+    } else if (d.active.length > 1) only = under.id;
+  }
+  const act = liveActive(d);
+  if (!act.length) return;
+  const commit = D.beginStruct(d);
+  let layers = act;
+  if (e.altKey) {
+    // Alt+перетаскивание: тащим копию, оригинал остаётся на месте
+    layers = act.map((l) => {
+      const { id, rev, cache, thumb, proxy, ...rest } = l; // у копии свой номер и свои кэши
+      const c = D.makeLayer({ ...rest, name: l.name + ' копия', canvas: im.cloneCanvas(l.canvas), adjust: l.adjust && { ...l.adjust }, slotCopy: false });
+      d.layers.splice(d.layers.indexOf(l) + 1, 0, c);
+      return c;
+    });
+    d.active = layers.map((l) => l.id);
+    refresh();
+  }
+  S.drag = { type: 'move', commit, copy: e.altKey, start: p, only, layers: layers.map((l) => ({ l, x: l.cx, y: l.cy })), moved: false };
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   const d = S.cur;
   if (!d || S.busy) return;
   const p = toDocPt(e), o = S.opts[S.tool];
   canvas.setPointerCapture(e.pointerId);
+  // Alt + правая кнопка: влево-вправо размер кисти, вверх-вниз жёсткость
+  if (e.button === 2 && e.altKey && o && o.size) {
+    S.drag = { type: 'brushsize', sx: e.clientX, sy: e.clientY, at: p, size0: o.size, hard0: o.hard };
+    S.cursor = p;
+    return;
+  }
+  // Ctrl+пробел щелчок приближает, Alt+пробел отдаляет
+  if (S.space && e.button === 0 && (e.ctrlKey || e.altKey)) {
+    const r = canvas.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, e.altKey ? 1 / 1.5 : 1.5);
+    return;
+  }
   if (e.button !== 0 || S.space || S.tool === 'hand') { S.drag = { type: 'pan' }; setCursor('grabbing'); return; }
+  // Alt+щелчок кистью берёт цвет с картинки, как пипетка
+  if (S.tool === 'brush' && e.altKey) {
+    const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const px = ctx.getImageData(Math.round((e.clientX - r.left) * dpr), Math.round((e.clientY - r.top) * dpr), 1, 1).data;
+    o.color = '#' + [px[0], px[1], px[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+    refreshOptions();
+    return;
+  }
 
   if (S.tool === 'zoom') {
     const r = canvas.getBoundingClientRect();
     zoomAt(e.clientX - r.left, e.clientY - r.top, e.altKey ? 1 / 1.5 : 1.5);
-  } else if (S.tool === 'move') {
-    const h = moveHit(p);
-    if (h) {
-      const l = h.layer;
-      S.drag = { ...h, commit: D.beginStruct(d), start: p, s0: l.scale, r0: l.rot, c0: { x: l.cx, y: l.cy } };
-      if (h.type === 'scale') S.drag.anchor = D.corners(l)[(h.corner + 2) % 4];
-    } else {
-      const under = d.layers.slice().reverse().find((l) => D.shown(d, l) && !l.locked && D.hit(l, p));
-      if (under && o.auto && !d.active.includes(under.id)) {
-        d.active = e.shiftKey || e.ctrlKey ? [...d.active, under.id] : [under.id];
-        refresh();
-      }
-      const act = liveActive(d);
-      const inside = act.some((l) => { const b = D.bounds(l); return p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h; });
-      if (act.length && (under || inside)) {
-        S.drag = { type: 'move', commit: D.beginStruct(d), start: p, layers: act.map((l) => ({ l, x: l.cx, y: l.cy })), moved: false };
-      }
-    }
+  } else if (S.tool === 'move' || tempMove(e)) {
+    moveDown(d, p, e);
   } else if (S.tool === 'marquee') {
     const one = soleEllipse(), h = one && !e.shiftKey ? circleHit({ x: one.cx, y: one.cy, r: Math.max(one.rx, one.ry) }, p) : '';
     if (h === 'edge') S.drag = { type: 'selresize', commit: D.beginStruct(d), s: one, k: one.ry / one.rx };
@@ -1371,7 +1479,8 @@ canvas.addEventListener('pointerdown', (e) => {
       S.drag = { type: 'marquee', commit: D.beginStruct(d), start, add: e.shiftKey, shape: { type: 'ellipse', cx: start.x, cy: start.y, rx: 0, ry: 0 } };
     }
   } else if (S.tool === 'lasso') {
-    S.drag = { type: 'lasso', commit: D.beginStruct(d), add: e.shiftKey, shape: { type: 'poly', pts: [p], sub: e.altKey } };
+    // как просили в студии: новая обводка добавляется к старой, Alt вычитает, щелчок снимает выделение
+    S.drag = { type: 'lasso', commit: D.beginStruct(d), add: true, shape: { type: 'poly', pts: [p], sub: e.altKey } };
   } else if (S.tool === 'pupil') {
     initPupil();
     const c = pupilOnDoc(), h = c ? circleHit(c, p) : '';
@@ -1385,7 +1494,17 @@ canvas.addEventListener('pointerdown', (e) => {
     else { const l = paintLayer(); if (l) beginStroke(l, 'stamp', p, e); }
   } else if (S.tool === 'brush' || S.tool === 'eraser' || S.tool === 'burn') {
     const l = paintLayer();
-    if (l) beginStroke(l, S.tool === 'brush' ? 'paint' : S.tool === 'eraser' ? 'erase' : 'burn', p, e);
+    if (l) {
+      const mode = S.tool === 'brush' ? 'paint' : S.tool === 'eraser' ? 'erase' : 'burn';
+      const last = S.lastPaint;
+      if (e.shiftKey && last && last.id === l.id && last.tool === S.tool) {
+        // Shift+щелчок: прямая от прошлой точки до этой
+        beginStroke(l, mode, last.p, e);
+        strokeTo(S.drag, p);
+        endStroke(S.drag);
+        S.drag = null;
+      } else beginStroke(l, mode, p, e);
+    }
   }
   requestDraw();
 });
@@ -1407,13 +1526,22 @@ canvas.addEventListener('pointermove', (e) => {
     if (S.opts[S.tool] && S.opts[S.tool].size) requestOverlay();
     return;
   }
+  if (g.type === 'brushsize') {
+    const o = S.opts[S.tool];
+    o.size = Math.round(Math.max(4, Math.min(600, g.size0 + (e.clientX - g.sx) * 2 / d.view.scale)));
+    if (g.hard0 != null) o.hard = Math.round(Math.max(0, Math.min(100, g.hard0 - (e.clientY - g.sy) / 2)));
+    S.cursor = g.at;
+    refreshOptions();
+    requestOverlay();
+    return;
+  }
   if (g.type === 'pan') {
     d.view.ox += e.movementX; d.view.oy += e.movementY;
   } else if (g.type === 'move') {
     let dx = p.x - g.start.x, dy = p.y - g.start.y;
     if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
     for (const m of g.layers) { m.l.cx = m.x + dx; m.l.cy = m.y + dy; }
-    if (g.layers.length === 1 && !e.ctrlKey) {
+    if (g.layers.length === 1 && !e.ctrlKey && !e.metaKey) {
       const l = g.layers[0].l, c = snapToCenter({ x: l.cx, y: l.cy });
       l.cx = c.x; l.cy = c.y;
     }
@@ -1432,6 +1560,7 @@ canvas.addEventListener('pointermove', (e) => {
     l.rot = r;
     g.moved = true;
   } else if (g.type === 'marquee') {
+    if (S.space) { g.start.x += e.movementX / d.view.scale; g.start.y += e.movementY / d.view.scale; }
     const o = S.opts.marquee, s = g.shape, dx = p.x - g.start.x, dy = p.y - g.start.y;
     const round = o.circle !== e.shiftKey && !g.add ? true : o.circle;
     if (o.center) {
@@ -1469,16 +1598,17 @@ function endDrag(e) {
   S.drag = null;
   if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
   if (!g || !d) return;
-  if (g.type === 'pan') setCursor();
+  if (g.type === 'pan' || g.type === 'brushsize') { setCursor(); if (g.type === 'brushsize') S.cursor = toDocPt(e); }
   if (g.type === 'move' || g.type === 'scale' || g.type === 'rotate') {
-    if (g.moved) g.commit(g.type === 'move' ? 'Перемещение' : g.type === 'scale' ? 'Размер слоя' : 'Поворот слоя');
+    if (g.moved || g.copy) g.commit(g.copy ? 'Копия слоя' : g.type === 'move' ? 'Перемещение' : g.type === 'scale' ? 'Размер слоя' : 'Поворот слоя');
+    else if (g.only) { S.cur.active = [g.only]; S.pupil = null; }
     refresh();
   }
   if (g.type === 'marquee' || g.type === 'lasso') {
     const s = g.shape;
     const ok = s.type === 'ellipse' ? s.rx > 2 && s.ry > 2 : s.pts.length > 2;
     const had = !!d.sel;
-    if (!ok) { if (!g.add && !s.sub) d.sel = null; }
+    if (!ok) { if (g.type === 'lasso' ? !s.sub : !g.add && !s.sub) d.sel = null; }
     else if ((g.add || s.sub) && d.sel) d.sel.shapes.push(s);
     else if (!s.sub) d.sel = { shapes: [s], feather: S.opts[S.tool].feather };
     if (ok) g.commit(g.type === 'marquee' ? 'Овальная область' : 'Лассо');
@@ -1499,9 +1629,16 @@ canvas.addEventListener('pointerleave', () => { S.cursor = null; if (!S.drag) re
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const r = canvas.getBoundingClientRect();
+  const r = canvas.getBoundingClientRect(), d = S.cur;
+  if (!d) return;
   S.wheeling = true;
-  zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.15 : 1 / 1.15);
+  // как в фотошопе: колесо листает вверх-вниз, с Ctrl или Shift вбок, с Alt масштабирует
+  if (e.altKey) { zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.15 : 1 / 1.15); return; }
+  const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
+  let dx = e.deltaX * unit, dy = e.deltaY * unit;
+  if (e.ctrlKey || e.shiftKey) { dx = dx || dy; dy = 0; }
+  d.view.ox -= dx; d.view.oy -= dy;
+  requestDraw();
 }, { passive: false });
 
 // --- Строка параметров инструмента ------------------------------------------
@@ -1561,14 +1698,22 @@ function refreshOptions() {
     add(c);
     size(); range('Жёсткость', 'hard', 0, 100, '%'); range('Нажим', 'flow', 1, 100, '%');
   } else if (S.tool === 'burn') {
-    const seg = ui.el('div', 'seg');
-    for (const [v, t] of [['burn', 'Затемнять'], ['dodge', 'Осветлять']]) {
-      const b = ui.el('button', o.mode === v ? 'on' : '', t);
-      b.onclick = () => { o.mode = v; refreshOptions(); };
-      seg.appendChild(b);
-    }
-    add(seg);
-    size(); range('Сила', 'flow', 1, 100, '%');
+    const seg = (items, key) => {
+      const box = ui.el('div', 'seg');
+      for (const [v, t] of items) {
+        const b = ui.el('button', o[key] === v ? 'on' : '', t);
+        b.onclick = () => { o[key] = v; refreshOptions(); };
+        box.appendChild(b);
+      }
+      return add(box);
+    };
+    seg([['burn', 'Затемнитель'], ['dodge', 'Осветлитель']], 'mode');
+    size(); range('Жёсткость', 'hard', 0, 100, '%');
+    const lab = ui.el('span', 'opt-label', 'Диапазон');
+    add(lab);
+    seg([['shadows', 'Тени'], ['mid', 'Средние тона'], ['highlights', 'Света']], 'range');
+    range('Экспонир.', 'flow', 1, 100, '%');
+    check('Защитить тона', 'protect');
   } else if (S.tool === 'pupil') {
     button('Сузить зрачок', applyPupil, true);
   } else {
@@ -1714,7 +1859,6 @@ function showEye(g) {
   d.solo = g.id;
   d.active = [g.layer.id];
   S.pupil = null;
-  if (g.cut) zoomToLayer(g.layer); else fit();
   if (S.tool === 'pupil') initPupil();
   refresh(); requestDraw();
 }
@@ -1725,7 +1869,7 @@ function showAllEyes() {
   const eyes = eyesOf(d);
   if (eyes.length) d.active = eyes.map((l) => l.id);
   S.pupil = null;
-  fit(); refresh();
+  refresh(); requestDraw();
 }
 
 function refreshEyes() {
@@ -2036,12 +2180,30 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   if (e.code === 'Space') { S.space = true; setCursor(); e.preventDefault(); return; }
   if (e.key === 'Alt') { S.alt = true; setCursor(); e.preventDefault(); return; }
+  if (e.key === 'Control') { S.ctrl = true; setCursor(); requestOverlay(); return; }
   if (e.code === 'Tab') { e.preventDefault(); document.body.classList.toggle('bare'); resize(); return; }
   if (!S.cur || S.busy) return;
   if (k === 'Backspace') { e.preventDefault(); run('clear'); return; }
-  if (k === 'Esc') { if (!$('home').hidden && S.cur) showHome(false); else if (S.cur.sel) run('deselect'); return; }
+  if (k === 'Esc') {
+    if (S.drag && S.drag.shape) { S.drag = null; requestOverlay(); return; } // бросить недорисованную обводку
+    if (!$('home').hidden && S.cur) showHome(false); else if (S.cur.sel) run('deselect');
+    return;
+  }
   if (k === 'Enter' && S.tool === 'pupil') { applyPupil(); return; }
-  if (TOOL_KEYS[k]) { setTool(TOOL_KEYS[k]); return; }
+  if (TOOL_KEYS[k]) {
+    // Удержание клавиши инструмента включает его на время, отпустил и вернулся к прежнему
+    if (!e.repeat) { S.spring = { key: e.code, prev: S.tool, at: Date.now() }; setTool(TOOL_KEYS[k]); }
+    return;
+  }
+  // Цифры как в фотошопе: у перемещения непрозрачность слоя, у кистей нажим. 1 = 10%, 0 = 100%
+  if (/^\d$/.test(k)) {
+    const v = k === '0' ? 100 : Number(k) * 10;
+    if (S.tool === 'move') {
+      const act = D.activeLayers(S.cur).filter((l) => !l.locked);
+      if (act.length) { D.structEdit(S.cur, 'Непрозрачность', () => { for (const l of act) l.opacity = v / 100; }); refresh(); requestDraw(); }
+    } else if (S.opts[S.tool] && S.opts[S.tool].flow != null) { S.opts[S.tool].flow = v; refreshOptions(); }
+    return;
+  }
   const o = S.opts[S.tool];
   if (k === 'D') { S.opts.brush.color = '#000000'; refreshOptions(); return; }
   if (o && o.hard != null && (k === 'Shift+[' || k === 'Shift+]')) {
@@ -2064,10 +2226,16 @@ window.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('keyup', (e) => {
+  if (e.key === 'Control') { S.ctrl = false; setCursor(); requestOverlay(); }
+  if (S.spring && e.code === S.spring.key) {
+    const sp = S.spring;
+    S.spring = null;
+    if (Date.now() - sp.at > 350 && !S.drag) setTool(sp.prev);
+  }
   if (e.code === 'Space') { S.space = false; setCursor(); }
   if (e.key === 'Alt') { S.alt = false; setCursor(); e.preventDefault(); }
 });
-window.addEventListener('blur', () => { S.alt = S.space = false; });
+window.addEventListener('blur', () => { S.alt = S.space = S.ctrl = false; S.spring = null; });
 window.addEventListener('resize', resize);
 
 window.addEventListener('dragover', (e) => {

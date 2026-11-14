@@ -4,8 +4,13 @@ const on = (channel) => (cb) => ipcRenderer.on(channel, (_e, payload) => cb(payl
 
 contextBridge.exposeInMainWorld('eyephoto', {
   version: () => ipcRenderer.invoke('app-version'),
-  openImage: () => ipcRenderer.invoke('open-image'),
+  openFile: (what) => ipcRenderer.invoke('open-file', what),
   openPath: (file) => ipcRenderer.invoke('open-path', file),
+  templates: () => ipcRenderer.invoke('templates-list'),
+  chooseTemplates: () => ipcRenderer.invoke('templates-choose'),
+  readTemplate: (file) => ipcRenderer.invoke('templates-read', file),
+  exportFile: (payload) => ipcRenderer.invoke('export-file', payload),
+  setDirty: (v) => ipcRenderer.send('set-dirty', v),
 
   settings: () => ipcRenderer.invoke('settings-get'),
   chooseSaveRoot: () => ipcRenderer.invoke('choose-save-root'),

@@ -73,7 +73,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--accent); ou
 .opt { display: flex; align-items: center; gap: 7px; color: var(--dim); }
 .opt .sl { display: flex; align-items: center; gap: 7px; }
 .opt .sl-name { color: var(--dim); }
-.opt .sl-range { width: 110px; order: 2; }
+.opt .sl-range { width: 84px; order: 2; }
 .opt .sl-num { order: 3; }
 .opt-sep { width: 1px; height: 18px; background: var(--rule); }
 .opt-hint { color: var(--faint); margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
@@ -279,3 +279,9 @@ body.bare { grid-template: "center" 1fr / 1fr; }
 body.bare .menubar, body.bare .optbar, body.bare .tools, body.bare .dock, body.bare .status, body.bare .tabs { display: none; }
 body.bare .center { grid-template-rows: 1fr; }
 .opt-label { color: var(--dim); }
+.opt .sl-num { width: 54px; }
+.opt-tool { min-width: 0 !important; flex: none; }
+.opt { flex: none; }
+.opt-select { display: flex; align-items: center; gap: 7px; color: var(--dim); }
+.opt-select select { height: 22px; padding: 0 6px; border: 1px solid #3a3d44; border-radius: var(--r); background: var(--ctl); color: var(--text); font: inherit; outline: 0; }
+.opt-select select:focus { border-color: var(--accent); }

@@ -1709,9 +1709,18 @@ function refreshOptions() {
     };
     seg([['burn', 'Затемнитель'], ['dodge', 'Осветлитель']], 'mode');
     size(); range('Жёсткость', 'hard', 0, 100, '%');
-    const lab = ui.el('span', 'opt-label', 'Диапазон');
-    add(lab);
-    seg([['shadows', 'Тени'], ['mid', 'Средние тона'], ['highlights', 'Света']], 'range');
+    // диапазон выпадающим списком, как в фотошопе
+    const wrap = ui.el('label', 'opt-select', '<span>Диапазон</span>');
+    const sel = ui.el('select');
+    for (const [v, t] of [['shadows', 'Тени'], ['mid', 'Средние тона'], ['highlights', 'Света']]) {
+      const op = ui.el('option', '', t);
+      op.value = v;
+      sel.appendChild(op);
+    }
+    sel.value = o.range;
+    sel.onchange = () => { o.range = sel.value; sel.blur(); };
+    wrap.appendChild(sel);
+    add(wrap);
     range('Экспонир.', 'flow', 1, 100, '%');
     check('Защитить тона', 'protect');
   } else if (S.tool === 'pupil') {

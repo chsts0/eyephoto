@@ -16,6 +16,9 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      created: ${{ steps.ver.outputs.exists == 'false' }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -76,3 +79,32 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "EyePhoto $V" \
             --notes "Версия $V"
+
+  # Версия для мака (Apple Silicon), для проверки. Без платной подписи Apple,
+  # поэтому обновляется вручную: программа сама сообщает о новой версии.
+  mac:
+    needs: build
+    if: needs.build.outputs.created == 'true'
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Собрать под мак
+        run: npx electron-builder --mac --publish never
+
+      - name: Добавить в релиз
+        run: |
+          V="${{ needs.build.outputs.version }}"
+          gh release upload "v$V" dist/EyePhoto-$V-mac.dmg dist/EyePhoto-$V-mac.zip dist/latest-mac.yml \
+            --repo "$GITHUB_REPOSITORY" --clobber

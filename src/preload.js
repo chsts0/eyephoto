@@ -26,5 +26,7 @@ contextBridge.exposeInMainWorld('eyephoto', {
 
   checkUpdate: () => ipcRenderer.invoke('update-check'),
   installUpdate: () => ipcRenderer.invoke('update-install'),
+  openReleases: () => ipcRenderer.invoke('open-releases'),
+  platform: process.platform,
   onUpdateStatus: on('update-status'),
 });

@@ -10,7 +10,7 @@ const ctx = canvas.getContext('2d', { alpha: false });
 const over = $('overlay');
 const octx = over.getContext('2d');
 
-const ACCENT = '#5aa2e0';
+const ACCENT = '#f2f2f3'; // рамки, круги и ручки на холсте: белые с тёмной подложкой
 const RAW_RE = /\.(arw|dng|cr2|cr3|nef|raf|rw2|orf)$/i;
 const PSD_RE = /\.(psd|psb)$/i;
 
@@ -639,7 +639,7 @@ async function showHome(on) {
   for (const item of t.items) {
     const card = ui.el('button', 'card');
     card.append(ui.el('div', 'card-art', ui.icon('sheet')), ui.el('div', 'card-name'), ui.el('div', 'card-note', 'PSD'));
-    card.children[1].textContent = item.name;
+    card.children[1].textContent = item.name[0].toUpperCase() + item.name.slice(1);
     card.title = item.name;
     card.onclick = () => openTemplate(item);
     box.appendChild(card);
@@ -1161,6 +1161,11 @@ function fillTemplate(doc, mode = 'auto', name = 'Глаза в шаблон') {
         // пара: раскладка студии внутри места; для вертикального места её поворачиваем
         const tall = box.h > box.w, W = tall ? box.h : box.w, H = tall ? box.w : box.h;
         const pos = im.pairSlots(W, H, slot.kind);
+        // в шаблонах глаза не должны заходить друг на друга: если раскладка листа
+        // ставит их впритык, уменьшаем оба, чтобы между ними остался зазор
+        const dist = Math.hypot(pos[0].cx - pos[1].cx, pos[0].cy - pos[1].cy), gap = H * 0.03;
+        const dd = Math.min(pos[0].d, dist - gap);
+        pos.forEach((q) => { q.d = dd; });
         const order = [eyes[0], eyes[1]];
         pos.forEach((p, i) => {
           const px = tall ? p.cy : p.cx, py = tall ? W - p.cx : p.cy;
@@ -1201,16 +1206,56 @@ async function openTemplate(item) {
   refresh(); fit();
 }
 
+// Шаблоны на панели раскладываются по разделам. Подписи короткие, полное имя
+// файла видно в подсказке.
+const TPL_GROUPS = [
+  ['Стикеры', /стикер/i],
+  ['Магниты', /магнит/i],
+  ['Фото', /полароид|поляроид|паларойд|поларойд|телефон|фото/i],
+];
+const TPL_NAMES = [
+  [/кругл.*стикер|стикер.*кругл/i, 'Круглые'],
+  [/шаблон стикер/i, 'Квадратные'],
+  [/стикер.*а4|а4.*стикер/i, 'Лист А4'],
+  [/магнит.*(биг|больш)/i, 'Большой'],
+  [/магнит.*(поменьше|маленьк|мини)/i, 'Малый'],
+  [/пол[ая]ро[ий]д/i, 'Полароид'],
+  [/телефон/i, 'Мини'],
+];
+
+function tplLabel(name) {
+  const hit = TPL_NAMES.find(([re]) => re.test(name));
+  if (hit) return hit[1];
+  const clean = name.replace(/\s*(новый|шаблон)\s*/gi, ' ').trim() || name;
+  return clean[0].toUpperCase() + clean.slice(1);
+}
+
 function refreshTemplates(list) {
   const box = $('tplBtns');
   box.textContent = '';
   $('tplPanel').hidden = !list.items.length;
+  const groups = new Map();
   for (const item of list.items) {
-    const b = ui.el('button', 'tpl-btn');
-    b.textContent = item.name;
-    b.title = S.cur && eyesOf(S.cur).length ? 'Открыть шаблон и сразу поставить в него глаза из этого листа' : 'Открыть шаблон';
-    b.onclick = () => openTemplate(item);
-    box.appendChild(b);
+    const g = (TPL_GROUPS.find(([, re]) => re.test(item.name)) || ['Другое'])[0];
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(item);
+  }
+  for (const [title] of [...TPL_GROUPS, ['Другое']]) {
+    const items = groups.get(title);
+    if (!items) continue;
+    const sec = ui.el('div', 'tpl-group');
+    sec.appendChild(ui.el('div', 'tpl-label', title));
+    const grid = ui.el('div', 'tpl-grid');
+    grid.style.setProperty('--n', Math.min(3, Math.max(2, items.length)));
+    for (const item of items) {
+      const b = ui.el('button', 'tpl-btn');
+      b.textContent = tplLabel(item.name);
+      b.title = item.name + ': открыть, глаза из текущего листа встанут сами';
+      b.onclick = () => openTemplate(item);
+      grid.appendChild(b);
+    }
+    sec.appendChild(grid);
+    box.appendChild(sec);
   }
 }
 async function loadTemplateList() { refreshTemplates(await api.templates()); }
@@ -1443,7 +1488,7 @@ const pupilUi = {};
       requestOverlay();
     },
   });
-  pupilUi.go = ui.el('button', 'btn primary wide', 'Сузить зрачок');
+  pupilUi.go = ui.el('button', 'btn wide', 'Сузить зрачок');
   pupilUi.go.onclick = () => {
     if (S.tool !== 'pupil') { setTool('pupil'); ui.toast('Подведите круг к краю зрачка и нажмите ещё раз'); return; }
     applyPupil();
@@ -2598,9 +2643,6 @@ const CMD = {
     api.setSettings({ guides: S.guides });
     requestOverlay();
   } },
-  themeGraphite: { label: 'Оформление: Графит', run: () => setTheme('') },
-  themeStudio: { label: 'Оформление: Студия', run: () => setTheme('studio') },
-  themeGlass: { label: 'Оформление: Стекло', run: () => setTheme('glass') },
   fit: { label: 'Вписать в окно', keys: 'Ctrl+0', run: fit, enabled: has },
   actual: { label: 'Реальный размер, 100%', keys: 'Ctrl+1', run: () => zoomAt(...center(), 1, 1), enabled: has },
   zoomIn: { label: 'Приблизить', keys: 'Ctrl+=', run: () => zoomAt(...center(), 1.25), enabled: has },
@@ -2613,7 +2655,7 @@ ui.menubar($('menus'), [
   { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerMerge', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
   { title: 'Фильтр', items: ['develop', 'neural'] },
-  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides', '-', 'themeGraphite', 'themeStudio', 'themeGlass'] },
+  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides'] },
 ], CMD);
 
 const run = (id) => { const c = CMD[id]; if (!S.busy && (!c.enabled || c.enabled())) c.run(); };
@@ -2733,6 +2775,7 @@ api.onUpdateStatus((s) => {
     case 'checking': return setUpdate('busy', 'Проверяю обновления');
     case 'latest': return setUpdate('ok', 'Последняя версия');
     case 'downloading': return setUpdate('busy', `Скачиваю обновление${s.percent ? ' ' + s.percent + '%' : ''}`);
+    case 'manual': return setUpdate('busy', `Вышла версия ${s.version}`, { label: 'Скачать', run: api.openReleases });
     case 'ready': return setUpdate('ok', `Версия ${s.version} поставится при закрытии`, { label: 'Перезапустить', run: api.installUpdate });
     case 'error': return setUpdate('err', 'Обновления недоступны, нужен интернет', { label: 'Повторить', run: api.checkUpdate });
   }
@@ -2742,14 +2785,8 @@ api.version().then((v) => { $('version').textContent = v; });
 api.modelStatus().then((s) => { S.modelReady = s.ready; });
 loadTemplateList();
 
-function setTheme(t) {
-  if (t) document.body.dataset.theme = t; else delete document.body.dataset.theme;
-  api.setSettings({ theme: t });
-  resize();
-}
 api.settings().then((s) => {
   if (s.guides === false) S.guides = false;
-  if (s.theme) { document.body.dataset.theme = s.theme; resize(); }
 });
 
 refreshOptions();

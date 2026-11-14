@@ -1,4 +1,7 @@
-const { app, BrowserWindow, dialog, ipcMain, protocol, net } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, protocol, net, Menu, shell } = require('electron');
+
+const MAC = process.platform === 'darwin';
+const RELEASES = 'https://github.com/chsts0/eyephoto/releases/latest';
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
@@ -49,7 +52,12 @@ function createWindow() {
   });
   // Системное меню убираем совсем: иначе на Windows Alt открывал бы его
   // и мешал фотошоповским сочетаниям с Alt.
-  win.removeMenu();
+  if (MAC) {
+    // на маке без меню программы не работают Cmd+C/V в полях и Cmd+Q
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }]));
+  } else {
+    win.removeMenu();
+  }
   win.loadURL('app://local/index.html');
 
   // Не даём случайно закрыть окно с несохранённой работой.
@@ -81,12 +89,14 @@ function setupUpdater() {
     return;
   }
   const { autoUpdater } = require('electron-updater');
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // На маке программа без платной подписи Apple, а такую система обновлять
+  // в фоне не даёт. Поэтому там только сообщаем о новой версии и даём ссылку.
+  autoUpdater.autoDownload = !MAC;
+  autoUpdater.autoInstallOnAppQuit = !MAC;
 
   autoUpdater.on('checking-for-update', () => status('checking'));
   autoUpdater.on('update-not-available', () => status('latest'));
-  autoUpdater.on('update-available', (i) => status('downloading', { version: i.version, percent: 0 }));
+  autoUpdater.on('update-available', (i) => status(MAC ? 'manual' : 'downloading', { version: i.version, percent: 0 }));
   autoUpdater.on('download-progress', (p) => status('downloading', { percent: Math.round(p.percent) }));
   autoUpdater.on('update-downloaded', (i) => status('ready', { version: i.version }));
   autoUpdater.on('error', (e) => status('error', { message: String(e && e.message ? e.message : e) }));
@@ -98,6 +108,7 @@ function setupUpdater() {
 
   ipcMain.handle('update-check', check);
   ipcMain.handle('update-install', () => autoUpdater.quitAndInstall(true, true));
+  ipcMain.handle('open-releases', () => shell.openExternal(RELEASES));
 }
 
 // --- Настройки ------------------------------------------------------------

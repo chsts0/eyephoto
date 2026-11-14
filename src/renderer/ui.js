@@ -172,7 +172,10 @@ export function slider({ label, min, max, step = 1, value, unit = '', reset, onI
   range.type = 'range';
   range.min = min; range.max = max; range.step = step;
   const paint = () => {
-    range.style.setProperty('--p', ((range.value - min) / (max - min)) * 100 + '%');
+    // у ползунков с нулём посередине подсветка идёт от центра к ручке, как в Camera Raw
+    const pos = ((range.value - min) / (max - min)) * 100, zero = min < 0 && max > 0 ? (-min / (max - min)) * 100 : 0;
+    range.style.setProperty('--a', Math.min(pos, zero) + '%');
+    range.style.setProperty('--b', Math.max(pos, zero) + '%');
     num.value = (fmt ? fmt(Number(range.value)) : String(range.value)).replace('.', ',') + unit;
   };
   const set = (v, fire) => {
@@ -193,6 +196,7 @@ export function slider({ label, min, max, step = 1, value, unit = '', reset, onI
     name.addEventListener('dblclick', (e) => { e.preventDefault(); set(reset, true); });
   }
   if (track) range.style.setProperty('--track', track);
+  row.title = label; // в узкой строке параметров название прячется, остаётся подсказка
   row.append(name, num, range);
   row.set = (v) => set(v, false);
   set(value, false);

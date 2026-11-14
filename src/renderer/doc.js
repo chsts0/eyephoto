@@ -129,7 +129,62 @@ const VIEW_LIMIT = 2048, DRAFT_LIMIT = 900;
 // Отметить, что вид слоя изменился.
 export function touch(l) {
   l.dirty = true;
+  l.dirtyRect = null;
   l.rev++;
+}
+
+// Изменился только кусок слоя. Проявленную копию тогда пересчитываем лишь
+// в этом месте: раньше после каждого мазка пересчитывался весь глаз, отсюда
+// и была задержка, когда отпускаешь кисть.
+export function touchRect(l, x, y, w, h) {
+  l.rev++;
+  if (l.dirty || !l.cache) { l.dirty = true; return; }
+  const r = l.dirtyRect;
+  l.dirtyRect = r
+    ? { x: Math.min(r.x, x), y: Math.min(r.y, y), x1: Math.max(r.x1, x + w), y1: Math.max(r.y1, y + h) }
+    : { x, y, x1: x + w, y1: y + h };
+}
+
+// Резкость смотрит на соседей примерно на 40 пикселей вокруг. Поэтому изменённое
+// место влияет на проявку в полосе такой ширины вокруг себя (её и пересчитываем),
+// а для расчёта этой полосы нужен ещё такой же запас картинки.
+const ADJUST_REACH = 44, ADJUST_PAD = ADJUST_REACH * 2 + 4;
+
+function refreshCacheRect(l) {
+  const r = l.dirtyRect, k = l.cacheScale;
+  l.dirtyRect = null;
+  const C = l.cache, CW = C.width, CH = C.height;
+  // Всё считаем в клетках экранной копии и выравниваем по сетке в 32 клетки:
+  // размытие в хроме для крупного радиуса идёт по уменьшенной копии и зависит
+  // от того, где начинается кусок. Так пересчитанное место совпадает с полным.
+  const G = 32, pad = ADJUST_PAD * k;
+  const cx0 = Math.max(0, Math.floor((r.x * k - pad) / G) * G), cy0 = Math.max(0, Math.floor((r.y * k - pad) / G) * G);
+  const cx1 = Math.min(CW, Math.ceil((r.x1 * k + pad) / G) * G), cy1 = Math.min(CH, Math.ceil((r.y1 * k + pad) / G) * G);
+  if (cx1 <= cx0 || cy1 <= cy0) return;
+  const cw = cx1 - cx0, ch = cy1 - cy0;
+  const part = im.makeCanvas(cw, ch), px = part.getContext('2d');
+  const fx = l.canvas.width / CW, fy = l.canvas.height / CH;
+  if (CW === l.canvas.width && CH === l.canvas.height) {
+    // 1:1 берём пиксели напрямую: после отмены хром при перерисовке куска слоя
+    // иногда отдавал его старый вид, хотя сами пиксели уже были верные
+    px.putImageData(l.canvas.getContext('2d').getImageData(cx0, cy0, cw, ch), 0, 0);
+  } else {
+    // та же выборка пикселей, что при уменьшении всего слоя
+    px.imageSmoothingQuality = 'high';
+    px.drawImage(l.canvas, cx0 * fx, cy0 * fy, cw * fx, ch * fy, 0, 0, cw, ch);
+  }
+  const out = im.applyAdjust(part, l.adjust, 1, k);
+  const reach = Math.ceil(ADJUST_REACH * k) + 1;
+  const ix0 = Math.max(0, Math.floor(r.x * k) - reach), iy0 = Math.max(0, Math.floor(r.y * k) - reach);
+  const ix1 = Math.min(CW, Math.ceil(r.x1 * k) + reach), iy1 = Math.min(CH, Math.ceil(r.y1 * k) + reach);
+  const x = C.getContext('2d');
+  x.save();
+  x.beginPath();
+  x.rect(ix0, iy0, ix1 - ix0, iy1 - iy0);
+  x.clip();
+  x.clearRect(ix0, iy0, ix1 - ix0, iy1 - iy0);
+  x.drawImage(out, cx0, cy0);
+  x.restore();
 }
 
 // zoom — сколько пикселей экрана приходится на пиксель листа.
@@ -156,7 +211,8 @@ export function layerView(l, draft = false, zoom = 1) {
     l.cache = im.applyAdjust(l.canvas, l.adjust, k);
     l.cacheScale = k;
     l.dirty = false;
-  }
+    l.dirtyRect = null;
+  } else if (l.dirtyRect) refreshCacheRect(l);
   return { canvas: l.cache, k: l.cacheScale };
 }
 
@@ -245,10 +301,12 @@ export function merged(lower, upper) {
   x.restore();
   const center = toDoc(lower, { x: (x0 + x1) / 2, y: (y0 + y1) / 2 });
   return makeLayer({
-    name: lower.name, kind: lower.kind, canvas: c, cx: center.x, cy: center.y, scale: lower.scale, rot: lower.rot,
+    // если хоть один из слоёв был глазом, результат тоже глаз: раскладки и полоска его видят
+    name: upper.kind === 'eye' && lower.kind !== 'eye' ? upper.name : lower.name,
+    kind: upper.kind === 'eye' || lower.kind === 'eye' ? 'eye' : lower.kind, canvas: c, cx: center.x, cy: center.y, scale: lower.scale, rot: lower.rot,
     visible: lower.visible, opacity: lower.opacity, blend: lower.blend, clip: lower.clip, locked: false,
     adjust: same && lower.adjust ? { ...lower.adjust } : null,
-    eye: lower.eye, eyeKey: lower.eyeKey,
+    eye: lower.eye || upper.eye, eyeKey: lower.eyeKey || upper.eyeKey,
     src: lower.src && { id: lower.src.id, x: lower.src.x + x0, y: lower.src.y + y0 },
   });
 }
@@ -390,7 +448,7 @@ export function structEdit(doc, name, fn) {
 
 // Изменение пикселей слоя в прямоугольнике. data — пиксели «до».
 export function pushPixels(doc, layer, name, x, y, data) {
-  touch(layer);
+  touchRect(layer, x, y, data.width, data.height);
   push(doc, {
     name,
     swap() {
@@ -398,7 +456,7 @@ export function pushPixels(doc, layer, name, x, y, data) {
       const now = ctx.getImageData(x, y, data.width, data.height);
       ctx.putImageData(data, x, y);
       data = now;
-      touch(layer);
+      touchRect(layer, x, y, data.width, data.height);
     },
   });
 }

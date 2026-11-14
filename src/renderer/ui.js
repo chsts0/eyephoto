@@ -8,6 +8,7 @@ const ICONS = {
   marquee: '<ellipse cx="10" cy="10" rx="6.5" ry="6.5" stroke-dasharray="2.6 2.2"/>',
   lasso: '<path d="M10 4C6.1 4 3 5.9 3 8.3s3.1 4.3 7 4.3 7-1.9 7-4.3S13.9 4 10 4z"/><path d="M6.3 12c-1.1.9-1 2.3.2 2.7 1 .3 1.9-.4 1.7-1.3M7.6 14.6l-1 2.9"/>',
   patch: '<path d="M4.8 11.2l6.4-6.4a2.8 2.8 0 0 1 4 4l-6.4 6.4a2.8 2.8 0 0 1-4-4z"/><path d="M7.6 8.4l4 4"/><circle cx="10" cy="10" r=".6" class="f"/>',
+  heal: '<path d="M4.600 11.600l7-7a2.800 2.800 0 0 1 4 4l-7 7a2.800 2.800 0 0 1-4-4z"/><path d="M8.200 8.200l3.600 3.600M8.800 11.200l.01.01M11.200 8.800l.01.01M10 10l.01.01"/>',
   stamp: '<path d="M7.8 3.5h4.4l-.8 5h2.4c.9 0 1.7.8 1.7 1.700V13h-11v-2.800C4.500 9.300 5.300 8.500 6.200 8.500h2.400z"/><path d="M4.500 16.500h11"/>',
   brush: '<path d="M14.700 3.300a1.550 1.550 0 0 1 2.200 2.200l-6.300 6.800-2.700-2.700z"/><path d="M7.300 10.800c-1.800 0-2.900 1.200-2.900 2.800 0 1.200-.6 2-1.400 2.500 3.300.9 6.500-.3 6.500-3.100"/>',
   eraser: '<path d="M11.300 4l5.200 5.200-6.800 6.800H6.300L3.500 13.200z"/><path d="M7.400 7.900l5.200 5.200M9.700 16H17"/>',
@@ -160,8 +161,9 @@ export function toast(text) {
 // --- Ползунок с числом ------------------------------------------------------
 // Двойной щелчок по названию возвращает значение по умолчанию.
 
-export function slider({ label, min, max, step = 1, value, unit = '', reset, onInput, onChange }) {
-  const row = el('label', 'sl');
+// fmt(v) — как показывать число; track — цветная дорожка, как у ползунков Camera Raw.
+export function slider({ label, min, max, step = 1, value, unit = '', reset, onInput, onChange, fmt, track }) {
+  const row = el('label', 'sl' + (track ? ' colored' : ''));
   const name = el('span', 'sl-name', label);
   const num = el('input', 'sl-num');
   num.type = 'text';
@@ -171,7 +173,7 @@ export function slider({ label, min, max, step = 1, value, unit = '', reset, onI
   range.min = min; range.max = max; range.step = step;
   const paint = () => {
     range.style.setProperty('--p', ((range.value - min) / (max - min)) * 100 + '%');
-    num.value = String(range.value).replace('.', ',') + unit;
+    num.value = (fmt ? fmt(Number(range.value)) : String(range.value)).replace('.', ',') + unit;
   };
   const set = (v, fire) => {
     range.value = Math.max(min, Math.min(max, v));
@@ -190,6 +192,7 @@ export function slider({ label, min, max, step = 1, value, unit = '', reset, onI
     name.title = 'Двойной щелчок: вернуть как было';
     name.addEventListener('dblclick', (e) => { e.preventDefault(); set(reset, true); });
   }
+  if (track) range.style.setProperty('--track', track);
   row.append(name, num, range);
   row.set = (v) => set(v, false);
   set(value, false);

@@ -68,6 +68,11 @@
       <div class="panel-body actions" id="actions"></div>
     </section>
 
+    <section class="panel" id="tplPanel" hidden>
+      <header><h3>Шаблоны</h3></header>
+      <div class="panel-body tpl-btns" id="tplBtns"></div>
+    </section>
+
     <section class="panel" id="eyesPanel" hidden>
       <div class="eyes" id="eyes"></div>
     </section>
@@ -105,15 +110,13 @@
       </div>
     </div>
     <aside class="dev-side">
-      <header><h3>Проявка</h3><span id="devName"></span></header>
+      <header><h3>Camera Raw</h3><span id="devName"></span></header>
+      <canvas class="dev-histo" id="devHisto" width="576" height="150"></canvas>
       <div class="dev-body" id="devBody"></div>
       <footer>
-        <div class="dev-links">
-          <button class="text-btn" id="devReset" title="Вернуть настройки, с которыми открываются новые снимки">Вернуть стандарт</button>
-          <button class="text-btn" id="devStd" title="Новые снимки будут открываться с этими настройками">Сделать стандартом</button>
-        </div>
+        <p class="dev-note">Текстура и резкость всегда на максимуме. Двойной щелчок по названию сбрасывает ползунок.</p>
         <div class="dev-actions">
-          <button class="btn" id="devCancel">Отмена</button>
+          <button class="btn" id="devCancel" title="С зажатым Alt: сбросить всё">Отмена</button>
           <button class="btn primary" id="devOk">Готово</button>
         </div>
       </footer>

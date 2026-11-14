@@ -23,7 +23,8 @@ const S = {
     marquee: { center: true, circle: true, feather: 8 },
     lasso: { feather: 0 },
     patch: { size: 60 },
-    stamp: { size: 80, hard: 50, flow: 100 },
+    stamp: { size: 80, hard: 50, flow: 100, aligned: true },
+    heal: { size: 80, hard: 50, aligned: true },
     brush: { size: 40, hard: 80, flow: 100, color: '#000000' },
     eraser: { size: 60, hard: 80, flow: 100 },
     burn: { size: 120, hard: 0, flow: 50, mode: 'burn', range: 'mid', protect: true },
@@ -201,12 +202,12 @@ function drawOverlay() {
     octx.stroke();
   }
 
-  // выделение: «бегущие муравьи»
-  const shapes = d.sel ? d.sel.shapes.slice() : [];
-  if (g && g.shape) shapes.push(g.shape);
-  for (const s of shapes) {
+  // выделение: «бегущие муравьи» по общему краю всех обводок, как в фотошопе
+  if (d.sel) drawSelectionEdge(d, dpr);
+  if (g && g.shape) {
     octx.beginPath();
-    D.shapePath(octx, s);
+    if (g.shape.type === 'poly') g.shape.pts.forEach((q, i) => (i ? octx.lineTo(q.x, q.y) : octx.moveTo(q.x, q.y)));
+    else D.shapePath(octx, g.shape);
     strokeBoth(px, true);
   }
 
@@ -240,7 +241,7 @@ function drawOverlay() {
   const pr = S.tool === 'pupil' && pupilOnDoc();
   if (pr) ring(pr, ACCENT, true);
 
-  if (S.tool === 'stamp' && S.stampSrc) {
+  if ((S.tool === 'stamp' || S.tool === 'heal') && S.stampSrc) {
     const p = g && g.type === 'stroke' && g.srcNow ? g.srcNow : S.stampSrc, a = 7 * px;
     octx.beginPath();
     octx.moveTo(p.x - a, p.y); octx.lineTo(p.x + a, p.y); octx.moveTo(p.x, p.y - a); octx.lineTo(p.x, p.y + a);
@@ -253,6 +254,54 @@ function drawOverlay() {
     const hd = S.opts[S.tool].hard;
     if (g && g.type === 'brushsize' && hd != null && hd > 2) ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 * hd / 100 }, 'rgba(255,90,90,.9)', false);
   }
+}
+
+// Край выделения считается по маске: все обводки сливаются в одно пятно,
+// и рамка идёт только по его внешнему краю. Маска пересчитывается, только
+// когда меняется выделение или вид; муравьи бегут поверх готового края.
+const selCache = { key: '', edge: null, ants: null };
+const antsTile = (() => {
+  const c = im.makeCanvas(8, 8), x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, 8, 8);
+  x.fillStyle = '#000';
+  for (let i = -8; i < 16; i += 8) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i + 4, 0); x.lineTo(i + 12, 8); x.lineTo(i + 8, 8); x.fill(); }
+  return c;
+})();
+
+function drawSelectionEdge(d, dpr) {
+  const v = d.view, W = over.width, H = over.height;
+  const key = JSON.stringify([d.sel.shapes, v.scale, v.ox, v.oy, W, H]);
+  if (key !== selCache.key || !selCache.edge || selCache.edge.width !== W || selCache.edge.height !== H) {
+    selCache.key = key;
+    const mask = im.makeCanvas(W, H), m = mask.getContext('2d');
+    m.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.ox, dpr * v.oy);
+    m.fillStyle = '#fff';
+    for (const s of d.sel.shapes) {
+      m.globalCompositeOperation = s.sub ? 'destination-out' : 'source-over';
+      m.beginPath(); D.shapePath(m, s); m.fill();
+    }
+    // край = маска минус маска, сжатая на пиксель
+    const er = im.makeCanvas(W, H), e = er.getContext('2d');
+    e.drawImage(mask, 0, 0);
+    e.globalCompositeOperation = 'destination-in';
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) e.drawImage(mask, dx, dy);
+    const edge = mask;
+    m.setTransform(1, 0, 0, 1, 0, 0);
+    m.globalCompositeOperation = 'destination-out';
+    m.drawImage(er, 0, 0);
+    selCache.edge = edge;
+    selCache.ants = im.makeCanvas(W, H);
+  }
+  const a = selCache.ants, ax = a.getContext('2d');
+  ax.globalCompositeOperation = 'copy';
+  ax.fillStyle = ax.createPattern(antsTile, 'repeat');
+  ax.save(); ax.translate(S.ants, 0); ax.fillRect(-8, 0, W + 8, H); ax.restore();
+  ax.globalCompositeOperation = 'destination-in';
+  ax.drawImage(selCache.edge, 0, 0);
+  octx.save();
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.drawImage(a, 0, 0);
+  octx.restore();
 }
 
 // Прилипание к направляющим по центру листа.
@@ -279,6 +328,7 @@ function switchDoc(doc) {
   S.drag = null;
   S.pupil = null;
   S.stampSrc = null;
+  S.stampOff = null;
   document.body.classList.toggle('no-doc', !doc);
   refreshOptions();
   refresh();
@@ -287,6 +337,7 @@ function switchDoc(doc) {
 }
 
 async function closeDoc(doc) {
+  if (S.busy) { ui.toast('Подождите, программа ещё работает с этим документом'); return; }
   if (doc.changed) {
     const go = await ui.ask({ title: `Закрыть «${doc.name}»?`, text: 'Документ не сохранён, работа пропадёт.', ok: 'Закрыть' });
     if (!go) return;
@@ -386,6 +437,7 @@ function psdToDoc(name, bytes, lock) {
   const doc = D.makeDoc({ name, w: psd.width, h: psd.height, dpi: Math.round((res && res.horizontalResolution) || 300), background: false });
   let skipped = 0;
   doc.slots = [];
+  doc.samples = [];
   doc.template = !!lock;
   if (meta) { doc.eyeSeq = meta.eyeSeq || 0; doc.eyes = meta.eyes || 0; }
   const walk = (nodes, hidden, opacity) => {
@@ -393,14 +445,16 @@ function psdToDoc(name, bytes, lock) {
       const hid = hidden || !!n.hidden, op = opacity * (n.opacity == null ? 1 : n.opacity);
       if (n.children) { walk(n.children, hid, op); continue; }
       const mine = meta && meta.layers[index++];
+      // Скрытые небольшие слои в шаблонах студии это образцы: они показывают,
+      // куда и какого размера ставить глаз («одиночное») или пару («парное по углам»).
+      const bw = (n.right || 0) - (n.left || 0), bh = (n.bottom || 0) - (n.top || 0);
+      if (lock && hid && bw > 0 && bh > 0 && bw < psd.width * 0.6 && bh < psd.height * 0.6) {
+        doc.samples.push({ x: n.left || 0, y: n.top || 0, w: bw, h: bh, name: (n.name || '').toLowerCase() });
+        continue;
+      }
       if (!n.canvas || !n.canvas.width || !n.canvas.height) { skipped++; continue; }
       const c = im.cloneCanvas(n.canvas);
       bakeMask(n, c);
-      // Скрытые небольшие слои в шаблонах студии это образцы: они показывают,
-      // куда и какого размера ставить глаз.
-      if (lock && hid && c.width < psd.width * 0.6 && c.height < psd.height * 0.6) {
-        doc.slots.push({ cx: (n.left || 0) + c.width / 2, cy: (n.top || 0) + c.height / 2, d: Math.max(c.width, c.height) });
-      }
       const blend = (n.blendMode || 'normal').replace(/ /g, '-');
       const full = c.width >= psd.width && c.height >= psd.height;
       doc.layers.push(D.makeLayer({
@@ -441,6 +495,7 @@ function placeCanvas(doc, c, name, adjust, pupil) {
   const k = Math.min(doc.w / c.width, doc.h / c.height, 1);
   const found = !!(pupil && pupil.found);
   const eye = doc.eyeSeq = (doc.eyeSeq || 0) + 1;
+  let placedLayer = null;
   D.structEdit(doc, 'Поместить снимок', () => {
     const l = D.makeLayer({
       name: name.replace(/\.[^.]+$/, ''), canvas: c, scale: k, kind: 'photo', adjust,
@@ -451,13 +506,16 @@ function placeCanvas(doc, c, name, adjust, pupil) {
     doc.layers.push(l);
     doc.active = [l.id];
     doc.sel = null;
+    placedLayer = l;
     if (found) {
       const m = Math.min(c.width, c.height);
       const r = Math.min(m * 0.46, Math.max(m * 0.15, pupil.r * 3.3)) * k;
+      l.irisGuess = { x: pupil.x, y: pupil.y, r: r / k };
       doc.sel = { shapes: [{ type: 'ellipse', cx: doc.w / 2, cy: doc.h / 2, rx: r, ry: r }], feather: S.opts.marquee.feather };
     }
   });
   doc.solo = eye; // новый снимок показываем один, остальные глаза не мешают
+  return placedLayer;
 }
 
 // Подпись глаза: последние 4 цифры имени файла (DSC04069 -> 4069), как в панели студии.
@@ -481,8 +539,10 @@ function eyeKeyFor(doc, name) {
 
 // file: { name, kind: raw | image | psd, data }. how: 'place' — слоем в текущий документ,
 // 'open' — отдельным документом.
+// Возвращает положенный на лист снимок, если это был снимок, иначе null.
 async function openData(file, how) {
-  if (S.busy || !file) return;
+  if (S.busy || !file) return null;
+  let placed = null;
   await setBusy(file.kind === 'raw' ? 'Проявляю снимок с камеры' : file.kind === 'psd' ? 'Открываю шаблон' : 'Открываю снимок');
   try {
     if (file.kind === 'psd') {
@@ -494,8 +554,8 @@ async function openData(file, how) {
       const pupil = im.findPupil(c);
       setBusy('');
       // сначала окно проявки, как Camera Raw в фотошопе
-      const adjust = await developDialog(c, { ...im.defaults }, file.name, pupil);
-      if (!adjust) return;
+      const adjust = await developDialog(c, im.newAdjust(), file.name, pupil);
+      if (!adjust) return null;
       if (how === 'open') {
         const doc = D.makeDoc({ name: file.name.replace(/\.[^.]+$/, ''), w: c.width, h: c.height, dpi: 300, background: false });
         addDoc(doc);
@@ -504,7 +564,7 @@ async function openData(file, how) {
       } else {
         if (!S.cur) addDoc(sheetDoc(S.lastFormat));
         showHome(false);
-        placeCanvas(S.cur, c, file.name, adjust, pupil);
+        placed = placeCanvas(S.cur, c, file.name, adjust, pupil);
         fit();
         setTool('marquee'); // первым делом снимок обводят кругом по радужке
       }
@@ -512,22 +572,57 @@ async function openData(file, how) {
   } catch (e) {
     console.error(e);
     setBusy('');
-    await ui.tell('Не получилось открыть файл', 'Подойдут ARW с камеры, JPG, PNG и PSD. Возможно, файл повреждён.');
-    return;
+    await ui.tell('Не получилось открыть файл', `«${file.name}»: подойдут ARW с камеры, JPG, PNG и PSD. Возможно, файл повреждён.`);
+    return null;
   }
   setBusy('');
   refresh();
   requestDraw();
+  return placed;
+}
+
+// Несколько файлов разом, как в фотошопе: у каждого снимка своё окно проявки,
+// все ложатся слоями в один лист, а в работе остаётся первый. Остальные ждут
+// в полоске «Глаза».
+async function openMany(files, how) {
+  // пока идёт открытие (а у снимков открыто окно проявки), новые файлы не принимаем:
+  // иначе второе окно проявки перебило бы первое
+  if (S.importing) { ui.toast('Дождитесь, пока откроются предыдущие файлы'); return; }
+  S.importing = true;
+  const placed = [];
+  try {
+    for (const f of files) {
+      const l = await openData(f, f.kind === 'psd' ? 'open' : how);
+      if (l) placed.push(l);
+    }
+  } finally {
+    S.importing = false;
+  }
+  if (placed.length > 1) focusPhoto(placed[0]);
+}
+
+function focusPhoto(l) {
+  const d = S.cur;
+  if (!d || !d.layers.includes(l)) return;
+  d.solo = l.eye;
+  d.active = [l.id];
+  if (l.irisGuess) {
+    const c = D.toDoc(l, l.irisGuess);
+    d.sel = { shapes: [{ type: 'ellipse', cx: c.x, cy: c.y, rx: l.irisGuess.r * l.scale, ry: l.irisGuess.r * l.scale }], feather: S.opts.marquee.feather };
+  }
+  setTool('marquee');
+  refresh(); requestDraw();
 }
 
 const fileKind = (name) => (RAW_RE.test(name) ? 'raw' : PSD_RE.test(name) ? 'psd' : 'image');
 
 async function openDialog(how) {
   if (S.busy) return;
-  const file = await api.openFile(how === 'place' ? 'photo' : 'any');
-  if (file) openData(file, how);
+  const files = await api.openFile(how === 'place' ? 'photo' : 'any');
+  if (files && files.length) openMany(files, how);
 }
 window.__openPath = async (p, how) => openData(await api.openPath(p), how || 'place');
+window.__openPaths = async (ps, how) => openMany(await Promise.all(ps.map((p) => api.openPath(p))), how || 'place');
 
 // --- Стартовый экран --------------------------------------------------------
 
@@ -546,7 +641,7 @@ async function showHome(on) {
     card.append(ui.el('div', 'card-art', ui.icon('sheet')), ui.el('div', 'card-name'), ui.el('div', 'card-note', 'PSD'));
     card.children[1].textContent = item.name;
     card.title = item.name;
-    card.onclick = async () => openData(await api.readTemplate(item.file), 'template');
+    card.onclick = () => openTemplate(item);
     box.appendChild(card);
     templateThumb(item, card.firstChild);
   }
@@ -600,7 +695,7 @@ $('homeClose').innerHTML = ui.icon('close');
 $('homeClose').onclick = () => showHome(false);
 $('homeOpen').innerHTML = 'Открыть файл…';
 $('homeOpen').onclick = () => openDialog('open');
-$('tplFolder').onclick = async () => { if (await api.chooseTemplates()) showHome(true); };
+$('tplFolder').onclick = async () => { if (await api.chooseTemplates()) { showHome(true); loadTemplateList(); } };
 
 // --- Нейронка ---------------------------------------------------------------
 
@@ -794,6 +889,8 @@ function mergeDown() {
     act = [d.layers[i - 1], act[0]];
   }
   if (act.some((l) => l.locked)) { ui.toast('Один из слоёв закреплён. Снимите замок щелчком по нему в панели «Слои»'); return; }
+  // как в фотошопе: со скрытым слоем не объединяем, иначе видимый глаз пропал бы вместе с ним
+  if (act.some((l) => !l.visible)) { ui.toast('Один из слоёв скрыт. Включите его или выберите другой слой'); return; }
   let res = act[0];
   for (const up of act.slice(1)) res = D.merged(res, up);
   D.structEdit(d, 'Объединить слои', () => {
@@ -932,28 +1029,191 @@ function layoutSingle() {
   fit(); refresh();
 }
 
-// Ставит глаза в места, отмеченные в шаблоне скрытыми образцами.
-// Если мест больше, чем глаз, глаз повторяется (лист с несколькими стикерами).
-function layoutSlots() {
-  const d = S.cur, eyes = eyesOf(d).filter((l) => !l.slotCopy);
-  if (!eyes.length) { ui.toast('Сначала вырежьте глаз: круг по радужке и Ctrl+J'); return; }
-  d.solo = 0;
-  D.structEdit(d, 'По местам шаблона', () => {
-    d.layers = d.layers.filter((l) => !l.slotCopy);
-    d.slots.forEach((slot, i) => {
-      let l = eyes[i];
-      if (!l) {
-        const src = eyes[i % eyes.length];
-        l = D.makeLayer({ name: src.name + ' копия', kind: 'eye', slotCopy: true, canvas: src.canvas, adjust: src.adjust && { ...src.adjust }, eye: src.eye, eyeKey: src.eyeKey, src: src.src });
-        d.layers.push(l);
+// --- Шаблоны: места под глаза ------------------------------------------------
+// Место под фото в шаблоне студии это чёрная область: круг стикера, квадрат,
+// окно полароида, прямоугольник магнита. Находим такие области на картинке
+// шаблона. Если рядом лежит скрытый образец, он задаёт, что ставить и какого
+// размера: один глаз или пару по углам. Без образца в прямоугольник идёт пара,
+// в круг один глаз.
+
+function findBlackAreas(doc) {
+  const k = Math.min(1, 1100 / Math.max(doc.w, doc.h));
+  const w = Math.max(1, Math.round(doc.w * k)), h = Math.max(1, Math.round(doc.h * k));
+  const c = im.makeCanvas(w, h), x = c.getContext('2d', { willReadFrequently: true });
+  x.scale(k, k);
+  D.composite(x, doc, { zoom: k });
+  const d = x.getImageData(0, 0, w, h).data, n = w * h;
+  const black = new Uint8Array(n);
+  for (let i = 0; i < n; i++) black[i] = d[i * 4 + 3] > 128 && 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2] < 60 ? 1 : 0;
+  const seen = new Uint8Array(n), stack = new Int32Array(n), out = [];
+  for (let s0 = 0; s0 < n; s0++) {
+    if (!black[s0] || seen[s0]) continue;
+    let top = 0, area = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+    stack[top++] = s0; seen[s0] = 1;
+    while (top) {
+      const i = stack[--top], px = i % w, py = (i - px) / w;
+      area++;
+      if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+      for (const j of [px > 0 ? i - 1 : -1, px < w - 1 ? i + 1 : -1, py > 0 ? i - w : -1, py < h - 1 ? i + w : -1]) {
+        if (j >= 0 && black[j] && !seen[j]) { seen[j] = 1; stack[top++] = j; }
       }
-      l.scale = slot.d / Math.max(l.canvas.width, l.canvas.height);
-      l.cx = slot.cx; l.cy = slot.cy; l.rot = 0;
-    });
-    d.active = [eyes[0].id];
-  });
-  fit(); refresh();
+    }
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    if (area < n * 0.003 || (bw > w * 0.9 && bh > h * 0.9)) continue;
+    out.push({ x: x0 / k, y: y0 / k, w: bw / k, h: bh / k, fill: area / (bw * bh) });
+  }
+  return out;
 }
+
+// Маска места в полном размере: чёрное плюс всё, что внутри него (тонкие
+// линии разметки внутри круга тоже считаются местом).
+function slotMask(doc, a) {
+  const pad = 3, x0 = Math.max(0, Math.floor(a.x) - pad), y0 = Math.max(0, Math.floor(a.y) - pad);
+  const w = Math.min(doc.w, Math.ceil(a.x + a.w) + pad) - x0, h = Math.min(doc.h, Math.ceil(a.y + a.h) + pad) - y0;
+  const c = im.makeCanvas(w, h), x = c.getContext('2d', { willReadFrequently: true });
+  x.translate(-x0, -y0);
+  D.composite(x, doc, { full: true });
+  const img = x.getImageData(0, 0, w, h), d = img.data, n = w * h;
+  const inside = new Uint8Array(n);
+  for (let i = 0; i < n; i++) inside[i] = d[i * 4 + 3] > 128 && 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2] < 90 ? 1 : 0;
+  // заливаем снаружи всё, до чего можно дойти не по чёрному: остальное и есть место
+  const out = new Uint8Array(n), stack = new Int32Array(n);
+  let top = 0;
+  const push = (i) => { if (!inside[i] && !out[i]) { out[i] = 1; stack[top++] = i; } };
+  for (let i = 0; i < w; i++) { push(i); push((h - 1) * w + i); }
+  for (let j = 0; j < h; j++) { push(j * w); push(j * w + w - 1); }
+  while (top) {
+    const i = stack[--top], px = i % w, py = (i - px) / w;
+    if (px > 0) push(i - 1); if (px < w - 1) push(i + 1); if (py > 0) push(i - w); if (py < h - 1) push(i + w);
+  }
+  for (let i = 0; i < n; i++) { d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = 0; d[i * 4 + 3] = out[i] ? 0 : 255; }
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  x.putImageData(img, 0, 0);
+  // лёгкое сглаживание края
+  const soft = im.makeCanvas(w, h), sx = soft.getContext('2d');
+  sx.filter = 'blur(0.6px)';
+  sx.drawImage(c, 0, 0);
+  return { canvas: soft, x: x0, y: y0 };
+}
+
+// Над каким слоем шаблона лежит место: верхний видимый слой, у которого здесь чёрное.
+function holderOf(doc, a) {
+  let best = null, bestHits = 0;
+  for (const l of doc.layers.slice().reverse()) {
+    if (!l.visible || l.tplPart) continue;
+    let hits = 0;
+    for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.3], [0.7, 0.3], [0.3, 0.7], [0.7, 0.7], [0.5, 0.2], [0.5, 0.8]]) {
+      const q = D.toLocal(l, { x: a.x + a.w * fx, y: a.y + a.h * fy });
+      if (q.x < 0 || q.y < 0 || q.x >= l.canvas.width || q.y >= l.canvas.height) continue;
+      const px = l.canvas.getContext('2d').getImageData(Math.floor(q.x), Math.floor(q.y), 1, 1).data;
+      if (px[3] > 128 && 0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2] < 90) hits++;
+    }
+    if (hits > bestHits) { best = l; bestHits = hits; }
+  }
+  return best;
+}
+
+function prepareTemplate(doc) {
+  doc.slots = [];
+  for (const a of findBlackAreas(doc)) {
+    const cx = a.x + a.w / 2, cy = a.y + a.h / 2;
+    const sample = doc.samples.find((s) => cx > s.x - s.w * 0.3 && cx < s.x + s.w * 1.3 && cy > s.y - s.h * 0.3 && cy < s.y + s.h * 1.3);
+    const round = a.fill > 0.68 && a.fill < 0.86 && Math.abs(a.w - a.h) < Math.max(a.w, a.h) * 0.08;
+    const kind = sample ? (/парн/.test(sample.name) ? (/цел/.test(sample.name) ? 'whole' : 'corners') : 'single') : round ? 'single' : 'corners';
+    doc.slots.push({ area: a, sample, kind, fixed: kind });
+  }
+  doc.slots.sort((p, q) => p.area.y - q.area.y || p.area.x - q.area.x);
+}
+
+// Глаза для шаблона: копии вырезанных глаз из листа, откуда открыли шаблон.
+function eyeSources(src) {
+  return eyesOf(src).filter((l) => !l.tplPart)
+    .sort((a, b) => (Math.abs(a.cx - b.cx) > 1 ? a.cx - b.cx : a.eye - b.eye))
+    .map((l) => ({ canvas: im.cloneCanvas(l.canvas), adjust: l.adjust && { ...l.adjust }, name: l.name, eye: l.eye, eyeKey: l.eyeKey }));
+}
+
+// Расставляет глаза по всем местам шаблона. mode: 'auto' — как задумано в шаблоне,
+// иначе 'single', 'corners' или 'whole' для всех мест.
+function fillTemplate(doc, mode = 'auto', name = 'Глаза в шаблон') {
+  const eyes = doc.tplEyes || [];
+  doc.tplMode = mode;
+  if (!eyes.length) { ui.toast('Нет вырезанных глаз. Откройте шаблон из листа с глазами или вырежьте глаз здесь'); return; }
+  D.structEdit(doc, name, () => {
+    doc.layers = doc.layers.filter((l) => !l.tplPart);
+    let next = 0;
+    doc.slots.forEach((slot, si) => {
+      slot.kind = mode === 'auto' ? slot.fixed : mode;
+      const a = slot.area, box = slot.sample || a;
+      const holder = holderOf(doc, a);
+      const m = slotMask(doc, a);
+      const base = D.makeLayer({ name: `Место ${si + 1}`, canvas: m.canvas, cx: m.x + m.canvas.width / 2, cy: m.y + m.canvas.height / 2, tplPart: true, locked: true });
+      const parts = [base];
+      // у каждого места своя копия глаза, чтобы правка одного не меняла другие
+      const put = (e, cx, cy, size) => parts.push(D.makeLayer({
+        name: e.name, kind: 'eye', canvas: im.cloneCanvas(e.canvas), adjust: e.adjust && { ...e.adjust }, eye: e.eye, eyeKey: e.eyeKey,
+        cx, cy, scale: size / Math.max(e.canvas.width, e.canvas.height), clip: true, tplPart: true,
+      }));
+      if (slot.kind === 'single' || eyes.length < 2) {
+        const e = eyes[next++ % eyes.length];
+        const size = slot.sample ? Math.max(box.w, box.h) : Math.min(box.w, box.h);
+        put(e, box.x + box.w / 2, box.y + box.h / 2, size);
+      } else {
+        // пара: раскладка студии внутри места; для вертикального места её поворачиваем
+        const tall = box.h > box.w, W = tall ? box.h : box.w, H = tall ? box.w : box.h;
+        const pos = im.pairSlots(W, H, slot.kind);
+        const order = [eyes[0], eyes[1]];
+        pos.forEach((p, i) => {
+          const px = tall ? p.cy : p.cx, py = tall ? W - p.cx : p.cy;
+          put(order[i], box.x + px, box.y + py, p.d);
+        });
+      }
+      const at = holder ? doc.layers.indexOf(holder) + 1 : doc.layers.length;
+      doc.layers.splice(at, 0, ...parts);
+    });
+    doc.active = [];
+  });
+  refresh(); requestDraw();
+}
+
+// Открыть шаблон, и если в текущем листе есть вырезанные глаза, сразу поставить их.
+async function openTemplate(item) {
+  if (S.busy) return;
+  const src = S.cur;
+  const file = await api.readTemplate(item.file);
+  if (!file) { ui.toast('Шаблон не найден. Проверьте папку шаблонов в меню «Файл»'); return; }
+  await setBusy('Открываю шаблон');
+  let doc;
+  try {
+    ({ doc } = psdToDoc(file.name.replace(PSD_RE, ''), file.data, true));
+    prepareTemplate(doc);
+  } catch (e) {
+    console.error(e);
+    setBusy('');
+    await ui.tell('Не получилось открыть шаблон', 'Файл повреждён или слишком большой.');
+    return;
+  }
+  doc.tplEyes = src ? eyeSources(src) : [];
+  addDoc(doc);
+  setBusy('');
+  if (!doc.slots.length) ui.toast('В шаблоне не нашлось чёрных мест под фото');
+  else if (doc.tplEyes.length) fillTemplate(doc);
+  doc.changed = !!doc.tplEyes.length;
+  refresh(); fit();
+}
+
+function refreshTemplates(list) {
+  const box = $('tplBtns');
+  box.textContent = '';
+  $('tplPanel').hidden = !list.items.length;
+  for (const item of list.items) {
+    const b = ui.el('button', 'tpl-btn');
+    b.textContent = item.name;
+    b.title = S.cur && eyesOf(S.cur).length ? 'Открыть шаблон и сразу поставить в него глаза из этого листа' : 'Открыть шаблон';
+    b.onclick = () => openTemplate(item);
+    box.appendChild(b);
+  }
+}
+async function loadTemplateList() { refreshTemplates(await api.templates()); }
 
 function refreshActions() {
   const d = S.cur, box = $('actions');
@@ -965,8 +1225,16 @@ function refreshActions() {
     b.title = title; b.onclick = fn; b.disabled = !on;
     box.appendChild(b);
   };
-  if (d.slots && d.slots.length) {
-    btn(`По местам шаблона (${d.slots.length})`, 'Поставить глаз туда, где в шаблоне лежат скрытые образцы', layoutSlots, eyesOf(d).length > 0, 'full');
+  if (d.template && d.slots.length) {
+    // в шаблоне те же кнопки работают по местам шаблона
+    if (!d.tplEyes || !d.tplEyes.length) d.tplEyes = eyeSources(d);
+    const has = d.tplEyes.length > 0, two = d.tplEyes.length > 1;
+    btn('Как в шаблоне', 'Расставить глаза так, как задумано в шаблоне', () => fillTemplate(d, 'auto'), has, 'full');
+    btn('Один', 'В каждое место по одному глазу', () => fillTemplate(d, 'single', 'Один глаз в шаблоне'), has);
+    btn('Углы', 'В каждое место пару по углам', () => fillTemplate(d, 'corners', 'Углы в шаблоне'), two);
+    btn('Целые', 'В каждое место пару целиком', () => fillTemplate(d, 'whole', 'Целые в шаблоне'), two);
+    btn('Поменять местами', 'Поменять глаза местами', () => { d.tplEyes.reverse(); fillTemplate(d, d.tplMode || 'auto', 'Поменять глаза'); }, two, 'full');
+    return;
   }
   btn('Углы', 'Два глаза крупно, по диагонали, с обрезкой краями листа', () => layoutPair('corners'), pair);
   btn('Целые', 'Два глаза целиком, по диагонали', () => layoutPair('whole'), pair);
@@ -1078,9 +1346,10 @@ async function exportAs() {
 const TOOLS = [
   ['move', 'Перемещение', 'V', 'Щелчок выбирает слой, мимо снимает выбор. Углы рамки: размер, снаружи от угла: поворот. Alt: тащить копию'],
   ['marquee', 'Овальная область', 'M', 'Тяните от центра радужки. Круг потом двигается за середину и меняется за край. Ctrl+J: вырезать на новый слой'],
-  ['lasso', 'Лассо', 'L', 'Каждая обводка добавляется к выделению. Alt: вычесть, щелчок без обводки: снять выделение'],
+  ['lasso', 'Лассо', 'L', 'Добавить к выделенной области: обводки сливаются в одно пятно. Alt: вычесть, щелчок: снять выделение'],
   '-',
-  ['patch', 'Заплатка', 'J', 'Закрасьте лишнее. Нейронка уберёт, когда отпустите мышку'],
+  ['heal', 'Восстанавливающая кисть', 'J', 'Alt+щелчок: откуда брать. Рисуйте по дефекту, при отпускании текстура подстроится под цвет вокруг'],
+  ['patch', 'Заплатка нейронкой', 'Shift+J', 'Закрасьте лишнее. Нейронка уберёт, когда отпустите мышку'],
   ['stamp', 'Штамп', 'S', 'Alt+щелчок: откуда брать. Потом рисуйте там, куда переносить'],
   ['brush', 'Кисть', 'B', 'Рисует выбранным цветом на активном слое'],
   ['eraser', 'Ластик', 'E', 'Стирает пиксели активного слоя до прозрачности'],
@@ -1116,7 +1385,8 @@ function initPupil() {
   S.pupil = {
     layerId: l.id,
     x: near ? g.x : w / 2, y: near ? g.y : h / 2,
-    r: near ? g.r : R * im.PUPIL_RATIO * 1.6,
+    // круг чуть шире чёрного, чтобы тёмный ободок вокруг зрачка тоже ушёл под чёрное
+    r: near ? g.r * 1.1 : R * im.PUPIL_RATIO * 1.6,
   };
 }
 
@@ -1206,13 +1476,18 @@ function beginStroke(l, mode, p, e) {
   if (l.adjust) {
     // проявленную копию правим теми же мазками, чтобы результат было видно сразу
     const v = D.layerView(l);
-    g.targets.push({ x: v.canvas.getContext('2d'), k: v.k, snap: mode === 'stamp' ? im.cloneCanvas(v.canvas) : null });
+    g.targets.push({ x: v.canvas.getContext('2d'), k: v.k, snap: mode === 'stamp' || mode === 'heal' ? im.cloneCanvas(v.canvas) : null });
   }
   if (mode === 'burn') g.dodge = (o.mode === 'dodge') !== e.altKey;
-  if (mode === 'stamp') {
-    const a = D.toLocal(l, S.stampSrc), b = D.toLocal(l, p);
-    g.off = { x: a.x - b.x, y: a.y - b.y };
-    g.srcDelta = { x: S.stampSrc.x - p.x, y: S.stampSrc.y - p.y };
+  if (mode === 'stamp' || mode === 'heal') {
+    // с «Выравниванием» источник едет вместе с кистью и между мазками, как в фотошопе;
+    // без него каждый мазок начинается с той же точки источника
+    if (!o.aligned || !S.stampOff) S.stampOff = { x: S.stampSrc.x - p.x, y: S.stampSrc.y - p.y };
+    const a = D.toLocal(l, { x: p.x + S.stampOff.x, y: p.y + S.stampOff.y }), b = D.toLocal(l, p);
+    // целое смещение: так перенесённая текстура не размывается пересчётом пикселей
+    g.off = { x: Math.round(a.x - b.x), y: Math.round(a.y - b.y) };
+    g.srcDelta = { ...S.stampOff };
+    if (mode === 'heal') g.dabs = [];
   }
   l.live = true;
   S.drag = g;
@@ -1222,7 +1497,8 @@ function beginStroke(l, mode, p, e) {
 function dab(g, p) {
   const o = S.opts[S.tool], l = g.layer;
   const q = D.toLocal(l, p), r = o.size / 2 / l.scale;
-  const hard = Math.min(0.98, (o.hard == null ? 0 : o.hard) / 100), flow = o.flow / 100;
+  const hard = Math.min(0.98, (o.hard == null ? 0 : o.hard) / 100), flow = (o.flow == null ? 100 : o.flow) / 100;
+  if (g.dabs) g.dabs.push({ x: q.x, y: q.y, r, hard });
   for (const t of g.targets) {
     const x = t.x, k = t.k, cx = q.x * k, cy = q.y * k, rr = Math.max(0.5, r * k);
     const grad = (color, a) => {
@@ -1235,7 +1511,7 @@ function dab(g, p) {
     x.save();
     x.globalCompositeOperation = 'source-over';
     x.globalAlpha = 1;
-    if (g.mode === 'stamp') {
+    if (g.mode === 'stamp' || g.mode === 'heal') {
       const s = Math.ceil(rr * 2) + 2, tmp = im.makeCanvas(s, s), tx = tmp.getContext('2d');
       tx.drawImage(t.snap, (q.x + g.off.x) * k - s / 2, (q.y + g.off.y) * k - s / 2, s, s, 0, 0, s, s);
       const gr = tx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, rr);
@@ -1315,7 +1591,85 @@ function strokeTo(g, p) {
   for (let t = step; t <= dist; t += step) dab(g, { x: from.x + dx * t / dist, y: from.y + dy * t / dist });
 }
 
-const STROKE_NAMES = { paint: 'Кисть', erase: 'Ластик', burn: 'Затемнитель', stamp: 'Штамп' };
+const STROKE_NAMES = { paint: 'Кисть', erase: 'Ластик', burn: 'Затемнитель', stamp: 'Штамп', heal: 'Восстанавливающая кисть' };
+
+// Восстанавливающая кисть. Пока рисуешь, текстура переносится как штампом.
+// При отпускании разница между тем, что было вокруг мазка, и перенесённой
+// текстурой плавно растягивается внутрь мазка: так заплатка берёт рисунок
+// у источника, а цвет и яркость у места, куда её положили.
+function healStroke(g, bx, by, bw, bh) {
+  const l = g.layer, W = l.canvas.width, H = l.canvas.height;
+  const pad = Math.ceil(Math.max(6, Math.max(...g.dabs.map((d) => d.r)) * 0.4));
+  const x0 = Math.max(0, bx - pad), y0 = Math.max(0, by - pad);
+  const w = Math.min(W, bx + bw + pad) - x0, h = Math.min(H, by + bh + pad) - y0;
+  if (w < 3 || h < 3) return;
+  // маска мазка
+  const mc = im.makeCanvas(w, h), mx = mc.getContext('2d', { willReadFrequently: true });
+  for (const d of g.dabs) {
+    const gr = mx.createRadialGradient(d.x - x0, d.y - y0, 0, d.x - x0, d.y - y0, d.r);
+    gr.addColorStop(0, '#fff'); gr.addColorStop(d.hard, '#fff'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    mx.fillStyle = gr;
+    mx.beginPath(); mx.arc(d.x - x0, d.y - y0, d.r, 0, Math.PI * 2); mx.fill();
+  }
+  const M = mx.getImageData(0, 0, w, h).data;
+  // как было и откуда берём текстуру
+  const O = g.snap.getContext('2d').getImageData(x0, y0, w, h).data;
+  const sc = im.makeCanvas(w, h), sx = sc.getContext('2d', { willReadFrequently: true });
+  sx.drawImage(g.snap, x0 + g.off.x, y0 + g.off.y, w, h, 0, 0, w, h);
+  const Sd = sx.getImageData(0, 0, w, h).data;
+  // разница на краю мазка, внутрь растягивается
+  const n = w * h, diff = [new Float32Array(n), new Float32Array(n), new Float32Array(n)], wt = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const m = M[i * 4 + 3] / 255;
+    if (m < 0.03 && O[i * 4 + 3] > 0 && Sd[i * 4 + 3] > 0) {
+      wt[i] = 1;
+      for (let c = 0; c < 3; c++) diff[c][i] = O[i * 4 + c] - Sd[i * 4 + c];
+    }
+  }
+  const fill = pullPush(diff, wt, w, h);
+  const cur = l.canvas.getContext('2d'), out = cur.getImageData(x0, y0, w, h), od = out.data;
+  for (let i = 0; i < n; i++) {
+    const m = M[i * 4 + 3] / 255;
+    if (m <= 0 || Sd[i * 4 + 3] === 0) continue;
+    for (let c = 0; c < 3; c++) {
+      const healed = Sd[i * 4 + c] + fill[c][i];
+      od[i * 4 + c] = O[i * 4 + c] * (1 - m) + healed * m;
+    }
+    od[i * 4 + 3] = O[i * 4 + 3];
+  }
+  cur.putImageData(out, x0, y0);
+}
+
+// Плавно заполняет пропуски: значения с весом 1 остаются, остальные
+// достраиваются из уменьшенных копий, от грубой к точной.
+function pullPush(ch, wt, w, h) {
+  if (w <= 1 && h <= 1) return ch;
+  const w2 = Math.ceil(w / 2), h2 = Math.ceil(h / 2), n2 = w2 * h2;
+  const cch = ch.map(() => new Float32Array(n2)), cw = new Float32Array(n2);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, j = (y >> 1) * w2 + (x >> 1), v = wt[i];
+    if (!v) continue;
+    cw[j] += v;
+    for (let c = 0; c < ch.length; c++) cch[c][j] += ch[c][i] * v;
+  }
+  for (let j = 0; j < n2; j++) if (cw[j] > 0) { for (let c = 0; c < ch.length; c++) cch[c][j] /= cw[j]; cw[j] = Math.min(1, cw[j]); }
+  const coarse = pullPush(cch, cw, w2, h2);
+  const out = ch.map((a) => new Float32Array(a));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, v = Math.min(1, wt[i]);
+    if (v >= 1) continue;
+    // берём среднее четырёх соседних клеток грубого уровня, чтобы не было ступенек
+    const fx = Math.min(w2 - 1, Math.max(0, (x - 0.5) / 2)), fy = Math.min(h2 - 1, Math.max(0, (y - 0.5) / 2));
+    const ix = Math.floor(fx), iy = Math.floor(fy), tx = fx - ix, ty = fy - iy;
+    const ix1 = Math.min(w2 - 1, ix + 1), iy1 = Math.min(h2 - 1, iy + 1);
+    for (let c = 0; c < ch.length; c++) {
+      const a = coarse[c];
+      const cv = (a[iy * w2 + ix] * (1 - tx) + a[iy * w2 + ix1] * tx) * (1 - ty) + (a[iy1 * w2 + ix] * (1 - tx) + a[iy1 * w2 + ix1] * tx) * ty;
+      out[c][i] = ch[c][i] * v + cv * (1 - v);
+    }
+  }
+  return out;
+}
 
 function endStroke(g) {
   const l = g.layer, b = g.box;
@@ -1324,6 +1678,7 @@ function endStroke(g) {
   const x = Math.max(0, Math.floor(b.x0)), y = Math.max(0, Math.floor(b.y0));
   const w = Math.min(l.canvas.width, Math.ceil(b.x1)) - x, h = Math.min(l.canvas.height, Math.ceil(b.y1)) - y;
   if (w > 0 && h > 0) {
+    if (g.mode === 'heal') healStroke(g, x, y, w, h);
     const before = g.snap.getContext('2d').getImageData(x, y, w, h);
     D.pushPixels(S.cur, l, g.mode === 'burn' && g.dodge ? 'Осветлитель' : STROKE_NAMES[g.mode], x, y, before);
   }
@@ -1338,13 +1693,14 @@ const two = (d, extra = '') => `<path d='${d}' stroke='#fff' stroke-width='3' ${
 const CURSORS = {
   move: svgCursor(`<path d='M4 3l9 5.2-3.7 1 2.1 4.3-1.7.8-2.1-4.3L5 12.600z' fill='#000' stroke='#fff' stroke-width='1'/>${two('M17 13v8M13 17h8M17 13l-1.300 1.500M17 13l1.300 1.500M17 21l-1.300-1.500M17 21l1.300-1.500M13 17l1.500-1.300M13 17l1.500 1.300M21 17l-1.500-1.300M21 17l-1.500 1.300')}`, 4, 3, 'default'),
   marquee: svgCursor(two('M12 4v6M12 14v6M4 12h6M14 12h6'), 12, 12, 'crosshair'),
-  lasso: svgCursor(`${two('M13 5c-4.400 0-8 2-8 4.500S8.600 14 13 14s8-2 8-4.500S17.400 5 13 5z')}${two('M8.500 13.300c-1.400.900-1.500 2.600-.300 3.300 1.100.700 2.500-.100 2.300-1.300M9.600 16.500 7 21')}`, 7, 21, 'crosshair'),
+  lasso: svgCursor(`${two('M13 5c-4.400 0-8 2-8 4.500S8.600 14 13 14s8-2 8-4.500S17.400 5 13 5z')}${two('M8.500 13.300c-1.400.900-1.500 2.600-.300 3.300 1.100.700 2.500-.100 2.300-1.300M9.600 16.500 7 21')}${two('M16 19.500h5M18.500 17v5')}`, 7, 21, 'crosshair'),
+  lassoMinus: svgCursor(`${two('M13 5c-4.400 0-8 2-8 4.500S8.600 14 13 14s8-2 8-4.500S17.400 5 13 5z')}${two('M8.500 13.300c-1.400.900-1.500 2.600-.300 3.300 1.100.700 2.500-.100 2.300-1.300M9.600 16.500 7 21')}${two('M16 19.500h5')}`, 7, 21, 'crosshair'),
   pupil: svgCursor(two('M12 5v5M12 14v5M5 12h5M14 12h5'), 12, 12, 'default'),
   zoomIn: svgCursor(`<circle cx='10' cy='10' r='6' fill='#fff' fill-opacity='.25' stroke='#fff' stroke-width='3'/><circle cx='10' cy='10' r='6' stroke='#000' stroke-width='1.300'/>${two('M14.500 14.500 20 20M7.500 10h5M10 7.500v5')}`, 10, 10, 'zoom-in'),
   zoomOut: svgCursor(`<circle cx='10' cy='10' r='6' fill='#fff' fill-opacity='.25' stroke='#fff' stroke-width='3'/><circle cx='10' cy='10' r='6' stroke='#000' stroke-width='1.300'/>${two('M14.500 14.500 20 20M7.500 10h5')}`, 10, 10, 'zoom-out'),
   dot: svgCursor(two('M12 9.500v5M9.500 12h5'), 12, 12, 'crosshair'),
 };
-const SIZED = ['patch', 'stamp', 'brush', 'eraser', 'burn'];
+const SIZED = ['patch', 'heal', 'stamp', 'brush', 'eraser', 'burn'];
 
 function setCursor(over) {
   const t = S.tool;
@@ -1353,10 +1709,11 @@ function setCursor(over) {
     if (t === 'hand' || S.space) c = S.drag && S.drag.type === 'pan' ? 'grabbing' : 'grab';
     else if (S.ctrl && TEMP_MOVE.includes(t)) c = CURSORS.move;
     else if (t === 'zoom') c = S.alt ? CURSORS.zoomOut : CURSORS.zoomIn;
+    else if (t === 'lasso') c = S.alt ? CURSORS.lassoMinus : CURSORS.lasso;
     else if (SIZED.includes(t)) {
       // совсем маленькую кисть кругом не разглядеть, показываем перекрестие
       const tiny = S.cur && S.opts[t].size * S.cur.view.scale < 7;
-      c = t === 'stamp' && S.alt ? CURSORS.marquee : tiny ? CURSORS.dot : 'none';
+      c = (t === 'stamp' || t === 'heal') && S.alt ? CURSORS.marquee : tiny ? CURSORS.dot : 'none';
     } else c = CURSORS[t] || 'default';
   }
   canvas.style.cursor = c;
@@ -1387,7 +1744,7 @@ function moveHit(p) {
 }
 
 // Ctrl с любым рисующим инструментом временно даёт перемещение, как в фотошопе.
-const TEMP_MOVE = ['marquee', 'lasso', 'patch', 'stamp', 'brush', 'eraser', 'burn', 'pupil'];
+const TEMP_MOVE = ['marquee', 'lasso', 'patch', 'heal', 'stamp', 'brush', 'eraser', 'burn', 'pupil'];
 const tempMove = (e) => e.ctrlKey && TEMP_MOVE.includes(S.tool);
 
 // Перемещение. С автовыбором щелчок по глазу выбирает его, щелчок мимо слоёв
@@ -1488,10 +1845,10 @@ canvas.addEventListener('pointerdown', (e) => {
     else if (h === 'in') S.drag = { type: 'pupilmove', c, dx: p.x - c.x, dy: p.y - c.y };
   } else if (S.tool === 'patch') {
     if (paintLayer()) S.drag = { type: 'patch', pts: [p], size: o.size };
-  } else if (S.tool === 'stamp') {
-    if (e.altKey) { S.stampSrc = p; ui.toast('Источник задан. Теперь рисуйте там, куда переносить'); }
+  } else if (S.tool === 'stamp' || S.tool === 'heal') {
+    if (e.altKey) { S.stampSrc = p; S.stampOff = null; ui.toast('Источник задан. Теперь рисуйте там, куда переносить'); }
     else if (!S.stampSrc) ui.toast('Сначала Alt+щелчок там, откуда брать');
-    else { const l = paintLayer(); if (l) beginStroke(l, 'stamp', p, e); }
+    else { const l = paintLayer(); if (l) beginStroke(l, S.tool, p, e); }
   } else if (S.tool === 'brush' || S.tool === 'eraser' || S.tool === 'burn') {
     const l = paintLayer();
     if (l) {
@@ -1594,6 +1951,9 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function endDrag(e) {
+  // сколько занимает отпускание мыши до готового кадра: для проверки на задержки
+  const t0 = performance.now();
+  requestAnimationFrame(() => requestAnimationFrame(() => { S.releaseMs = Math.round(performance.now() - t0); }));
   const d = S.cur, g = S.drag;
   S.drag = null;
   if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
@@ -1606,7 +1966,10 @@ function endDrag(e) {
   }
   if (g.type === 'marquee' || g.type === 'lasso') {
     const s = g.shape;
-    const ok = s.type === 'ellipse' ? s.rx > 2 && s.ry > 2 : s.pts.length > 2;
+    // щелчок с дрожью руки не считаем обводкой: смотрим размер на экране
+    const spanPx = s.type === 'ellipse' ? Math.min(s.rx, s.ry) * 2 * d.view.scale
+      : Math.max(Math.max(...s.pts.map((q) => q.x)) - Math.min(...s.pts.map((q) => q.x)), Math.max(...s.pts.map((q) => q.y)) - Math.min(...s.pts.map((q) => q.y))) * d.view.scale;
+    const ok = (s.type === 'ellipse' ? s.rx > 2 && s.ry > 2 : s.pts.length > 2) && spanPx > 5;
     const had = !!d.sel;
     if (!ok) { if (g.type === 'lasso' ? !s.sub : !g.add && !s.sub) d.sel = null; }
     else if ((g.add || s.sub) && d.sel) d.sel.shapes.push(s);
@@ -1691,6 +2054,9 @@ function refreshOptions() {
     size();
   } else if (S.tool === 'stamp' || S.tool === 'eraser') {
     size(); range('Жёсткость', 'hard', 0, 100, '%'); range('Нажим', 'flow', 1, 100, '%');
+    if (S.tool === 'stamp') check('Выравн.', 'aligned');
+  } else if (S.tool === 'heal') {
+    size(); range('Жёсткость', 'hard', 0, 100, '%'); check('Выравн.', 'aligned');
   } else if (S.tool === 'brush') {
     const c = ui.el('input', 'swatch');
     c.type = 'color'; c.value = o.color; c.title = 'Цвет кисти';
@@ -1737,23 +2103,95 @@ function refreshOptions() {
 // Окно проявки: большой предпросмотр и ручки справа, как Camera Raw.
 // Открывается при вставке снимка и по Ctrl+Shift+A для выбранного слоя.
 // Считается только то, что видно на экране, поэтому ручки отзываются сразу.
-const DEV_GROUPS = [
-  ['Баланс белого', [['temp', 'Температура', -100, 100], ['tint', 'Оттенок', -100, 100]]],
-  ['Свет', [['exp', 'Экспозиция', -100, 100], ['contrast', 'Контрастность', -50, 80]]],
-  ['Цвет и детали', [['sat', 'Насыщенность', -100, 100], ['detail', 'Текстура и резкость', 0, 200]]],
+// Окно проявки по образцу Camera Raw: гистограмма, «Свет», «Цвет»
+// и «Смешение цветов». Считается только то, что видно на экране.
+const signed = (v) => (v > 0 ? '+' : '') + v;
+const DEV_LIGHT = [
+  ['exp', 'Экспозиция', -5, 5, 0.05, (v) => signed(v.toFixed(2)), 'linear-gradient(90deg,#111,#eee)'],
+  ['contrast', 'Контрастность', -100, 100, 1, signed, 'linear-gradient(90deg,#777,#333 50%,#ddd 50%,#fff)'],
+  ['highlights', 'Светлые', -100, 100, 1, signed],
+  ['shadows', 'Тени', -100, 100, 1, signed],
+  ['whites', 'Белые', -100, 100, 1, signed],
+  ['blacks', 'Черные', -100, 100, 1, signed],
 ];
-const dev = { rows: {}, src: null, p: null, zoom: 'fit', center: null, done: null, raf: 0, pan: null };
+const DEV_COLOR = [
+  ['temp', 'Температура', -100, 100, 1, signed, 'linear-gradient(90deg,#3f74c9,#d9d9d9,#e3c23c)'],
+  ['tint', 'Оттенок', -100, 100, 1, signed, 'linear-gradient(90deg,#4caf50,#d9d9d9,#c45ec4)'],
+  ['vibrance', 'Красочность', -100, 100, 1, signed, 'linear-gradient(90deg,#8b8b8b,#d97b3a)'],
+  ['sat', 'Насыщенность', -100, 100, 1, signed, 'linear-gradient(90deg,#8b8b8b,#e0433a)'],
+];
+const HSL_HEX = ['#e8453c', '#ee8a2f', '#e6d23a', '#47b04b', '#3fc4c9', '#3f6fd8', '#8b4fd8', '#d64fb6'];
+const HSL_NEXT = [['#e84a8c', '#ee8a2f'], ['#e8453c', '#e6d23a'], ['#ee8a2f', '#47b04b'], ['#e6d23a', '#3fc4c9'], ['#47b04b', '#3f6fd8'], ['#3fc4c9', '#8b4fd8'], ['#3f6fd8', '#d64fb6'], ['#8b4fd8', '#e8453c']];
+const dev = { rows: {}, hslRows: [], hslTab: 'h', src: null, p: null, zoom: 'fit', center: null, done: null, raf: 0, pan: null };
 
-for (const [title, rows] of DEV_GROUPS) {
-  $('devBody').appendChild(ui.el('h4', '', title));
-  for (const [key, label, min, max] of rows) {
-    dev.rows[key] = ui.slider({
-      label, min, max, value: 0, reset: im.FACTORY_ADJUST[key],
-      onInput: (v) => { dev.p[key] = v; cancelAnimationFrame(dev.raf); dev.raf = requestAnimationFrame(() => devRender(true)); },
+function devSlider([key, label, min, max, step, fmt, track]) {
+  dev.rows[key] = ui.slider({
+    label, min, max, step, value: 0, reset: 0, fmt, track,
+    onInput: (v) => { dev.p[key] = v; devQueue(); },
+    onChange: () => { cancelAnimationFrame(dev.raf); devRender(false); },
+  });
+  return dev.rows[key];
+}
+
+function devSection(title, open, build) {
+  const det = ui.el('details', 'dev-sec');
+  det.open = open;
+  det.appendChild(ui.el('summary', '', title));
+  build(det);
+  $('devBody').appendChild(det);
+}
+
+devSection('Свет', true, (box) => DEV_LIGHT.forEach((r) => box.appendChild(devSlider(r))));
+devSection('Цвет', true, (box) => {
+  box.appendChild(ui.el('div', 'dev-sub', 'Баланс белого: как снято, ниже поправка'));
+  DEV_COLOR.forEach((r) => box.appendChild(devSlider(r)));
+});
+devSection('Смешение цветов', false, (box) => {
+  const seg = ui.el('div', 'seg');
+  for (const [k, t] of [['h', 'Тон'], ['s', 'Насыщенность'], ['l', 'Светимость']]) {
+    const b = ui.el('button', k === dev.hslTab ? 'on' : '', t);
+    b.dataset.k = k;
+    b.onclick = () => { dev.hslTab = k; seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); devSync(); };
+    seg.appendChild(b);
+  }
+  box.appendChild(seg);
+  im.HSL_COLORS.forEach((name, i) => {
+    const row = ui.slider({
+      label: name, min: -100, max: 100, value: 0, reset: 0, fmt: signed,
+      onInput: (v) => { dev.p.hsl[dev.hslTab][i] = v; devQueue(); },
       onChange: () => { cancelAnimationFrame(dev.raf); devRender(false); },
     });
-    $('devBody').appendChild(dev.rows[key]);
-  }
+    dev.hslRows.push(row);
+    box.appendChild(row);
+  });
+});
+
+function devQueue() {
+  cancelAnimationFrame(dev.raf);
+  dev.raf = requestAnimationFrame(() => devRender(true));
+}
+
+function devHistogram(c) {
+  const hc = $('devHisto'), x = hc.getContext('2d'), W = hc.width, H = hc.height;
+  const small = im.makeCanvas(256, Math.max(1, Math.round(256 * c.height / c.width)));
+  small.getContext('2d').drawImage(c, 0, 0, small.width, small.height);
+  const d = small.getContext('2d').getImageData(0, 0, small.width, small.height).data;
+  const hs = [new Float32Array(256), new Float32Array(256), new Float32Array(256)];
+  for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 0) { hs[0][d[i]]++; hs[1][d[i + 1]]++; hs[2][d[i + 2]]++; }
+  // крайние столбцы не учитываем в масштабе, иначе чёрный фон всё сплющит
+  let max = 1;
+  for (const h of hs) for (let i = 2; i < 254; i++) max = Math.max(max, h[i]);
+  x.clearRect(0, 0, W, H);
+  x.globalCompositeOperation = 'lighter';
+  ['#e5483f', '#45c25a', '#3f7de8'].forEach((col, k) => {
+    x.fillStyle = col;
+    x.globalAlpha = 0.75;
+    x.beginPath(); x.moveTo(0, H);
+    for (let i = 0; i < 256; i++) x.lineTo(i / 255 * W, H - Math.min(1, hs[k][i] / max) * (H - 4));
+    x.lineTo(W, H); x.closePath(); x.fill();
+  });
+  x.globalCompositeOperation = 'source-over';
+  x.globalAlpha = 1;
 }
 
 function devRender(draft) {
@@ -1765,30 +2203,41 @@ function devRender(draft) {
   x.fillStyle = '#0c0d0e';
   x.fillRect(0, 0, vw, vh);
   x.imageSmoothingQuality = 'high';
+  let shown;
   if (dev.zoom === 'fit') {
     const k = Math.min((vw - 48) / W, (vh - 48) / H, 1);
-    const out = raw ? dev.src : im.applyAdjust(dev.src, dev.p, k * q);
-    x.drawImage(out, (vw - W * k) / 2, (vh - H * k) / 2, W * k, H * k);
+    shown = raw ? dev.src : im.applyAdjust(dev.src, dev.p, k * q);
+    x.drawImage(shown, (vw - W * k) / 2, (vh - H * k) / 2, W * k, H * k);
   } else {
     const cw = Math.min(W, vw), ch = Math.min(H, vh);
     const sx = Math.round(Math.max(0, Math.min(W - cw, dev.center.x - cw / 2)));
     const sy = Math.round(Math.max(0, Math.min(H - ch, dev.center.y - ch / 2)));
     const part = im.makeCanvas(cw, ch);
     part.getContext('2d').drawImage(dev.src, sx, sy, cw, ch, 0, 0, cw, ch);
-    const out = raw ? part : im.applyAdjust(part, dev.p, q);
-    x.drawImage(out, (vw - cw) / 2, (vh - ch) / 2, cw, ch);
+    shown = raw ? part : im.applyAdjust(part, dev.p, q);
+    x.drawImage(shown, (vw - cw) / 2, (vh - ch) / 2, cw, ch);
   }
+  if (!draft) devHistogram(shown);
 }
 
 function devSync() {
   for (const key of Object.keys(dev.rows)) dev.rows[key].set(dev.p[key]);
+  const tab = dev.hslTab;
+  dev.hslRows.forEach((row, i) => {
+    row.set(dev.p.hsl[tab][i]);
+    const c = HSL_HEX[i], [a, b] = HSL_NEXT[i];
+    const track = tab === 'h' ? `linear-gradient(90deg,${a},${c},${b})` : tab === 's' ? `linear-gradient(90deg,#8b8b8b,${c})` : `linear-gradient(90deg,#111,${c},#fff)`;
+    row.classList.add('colored');
+    row.querySelector('.sl-range').style.setProperty('--track', track);
+  });
   document.querySelectorAll('#devZoom button').forEach((b) => b.classList.toggle('on', b.dataset.z === dev.zoom));
   $('devCanvas').style.cursor = dev.zoom === 'fit' ? 'zoom-in' : 'grab';
 }
 
 function developDialog(src, adjust, name, pupil) {
   dev.src = src;
-  dev.p = { ...adjust };
+  dev.p = im.normalizeAdjust(adjust);
+  dev.p.detail = 100; // текстура и резкость в студии всегда на максимуме
   dev.zoom = 'fit';
   dev.center = pupil && pupil.found ? { x: pupil.x, y: pupil.y } : { x: src.width / 2, y: src.height / 2 };
   $('devName').textContent = name;
@@ -1805,15 +2254,15 @@ function developDialog(src, adjust, name, pupil) {
   });
 }
 
+// Как в Camera Raw: с зажатым Alt «Отмена» превращается в «Сбросить»
+function devReset() { dev.p = im.newAdjust(); devSync(); devRender(false); }
+window.addEventListener('keydown', (e) => { if (e.key === 'Alt' && dev.done) $('devCancel').textContent = 'Сбросить'; });
+window.addEventListener('keyup', (e) => { if (e.key === 'Alt') $('devCancel').textContent = 'Отмена'; });
+window.addEventListener('blur', () => { $('devCancel').textContent = 'Отмена'; });
+
 $('devOk').onclick = () => dev.done && dev.done({ ...dev.p });
-$('devCancel').onclick = () => dev.done && dev.done(null);
+$('devCancel').onclick = (e) => { if (e.altKey) devReset(); else if (dev.done) dev.done(null); };
 $('devBefore').onchange = () => devRender(false);
-$('devReset').onclick = () => { dev.p = { ...im.defaults }; devSync(); devRender(false); };
-$('devStd').onclick = () => {
-  im.setDefaults(dev.p);
-  api.setSettings({ adjustDefault: { ...dev.p } });
-  ui.toast('Запомнил. Новые снимки будут открываться с этими настройками');
-};
 document.querySelectorAll('#devZoom button').forEach((b) => {
   b.onclick = () => { dev.zoom = b.dataset.z; devSync(); devRender(false); };
 });
@@ -1854,7 +2303,7 @@ window.addEventListener('resize', () => { if (dev.src) devRender(false); });
 async function developLayer() {
   const d = S.cur, l = layer();
   if (!d || !l) { ui.toast('Выберите слой в панели «Слои»'); return; }
-  const res = await developDialog(l.canvas, l.adjust ? { ...l.adjust } : { ...im.NEUTRAL_ADJUST }, l.name, null);
+  const res = await developDialog(l.canvas, l.adjust ? l.adjust : im.NEUTRAL_ADJUST, l.name, null);
   if (!res) return;
   D.structEdit(d, 'Проявка', () => { l.adjust = res; D.touch(l); });
   refresh(); requestDraw();
@@ -1865,6 +2314,7 @@ async function developLayer() {
 // Сами слои при этом не скрываются, в истории ничего лишнего не появляется.
 function showEye(g) {
   const d = S.cur;
+  if (!g.cut && g.layer.irisGuess && !d.sel) { focusPhoto(g.layer); return; }
   d.solo = g.id;
   d.active = [g.layer.id];
   S.pupil = null;
@@ -2111,7 +2561,7 @@ const CMD = {
   savePsd: { label: 'Сохранить как PSD…', keys: 'Ctrl+Shift+S', run: savePsd, enabled: has },
   export: { label: 'Экспорт как…', keys: 'Ctrl+Shift+Alt+W', run: exportAs, enabled: has },
   close: { label: 'Закрыть документ', keys: 'Ctrl+W', run: () => closeDoc(S.cur), enabled: has },
-  tplFolder: { label: 'Папка шаблонов…', run: async () => { if (await api.chooseTemplates()) ui.toast('Папка шаблонов выбрана'); } },
+  tplFolder: { label: 'Папка шаблонов…', run: async () => { if (await api.chooseTemplates()) { ui.toast('Папка шаблонов выбрана'); loadTemplateList(); } } },
   pointPrefix: { label: 'Номер точки…', run: async () => { const v = await askPrefix((await api.settings()).pointPrefix); if (v) ui.toast(`Имена файлов теперь начинаются с ${v}-`); } },
   saveFolder: { label: 'Папка готовых фото…', run: async () => { const p = await api.chooseSaveRoot(); if (p) ui.toast('Готовые фото: ' + p); } },
 
@@ -2148,6 +2598,9 @@ const CMD = {
     api.setSettings({ guides: S.guides });
     requestOverlay();
   } },
+  themeGraphite: { label: 'Оформление: Графит', run: () => setTheme('') },
+  themeStudio: { label: 'Оформление: Студия', run: () => setTheme('studio') },
+  themeGlass: { label: 'Оформление: Стекло', run: () => setTheme('glass') },
   fit: { label: 'Вписать в окно', keys: 'Ctrl+0', run: fit, enabled: has },
   actual: { label: 'Реальный размер, 100%', keys: 'Ctrl+1', run: () => zoomAt(...center(), 1, 1), enabled: has },
   zoomIn: { label: 'Приблизить', keys: 'Ctrl+=', run: () => zoomAt(...center(), 1.25), enabled: has },
@@ -2160,7 +2613,7 @@ ui.menubar($('menus'), [
   { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerMerge', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
   { title: 'Фильтр', items: ['develop', 'neural'] },
-  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides'] },
+  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides', '-', 'themeGraphite', 'themeStudio', 'themeGlass'] },
 ], CMD);
 
 const run = (id) => { const c = CMD[id]; if (!S.busy && (!c.enabled || c.enabled())) c.run(); };
@@ -2257,10 +2710,11 @@ window.addEventListener('drop', async (e) => {
   stage.classList.remove('drag');
   if (dragLayerId) return;
   e.preventDefault();
-  const file = e.dataTransfer.files[0];
-  if (!file) return;
-  const kind = fileKind(file.name);
-  openData({ name: file.name, kind, data: new Uint8Array(await file.arrayBuffer()) }, kind === 'psd' ? 'open' : 'place');
+  const list = [...e.dataTransfer.files];
+  if (!list.length || S.busy) return;
+  const files = [];
+  for (const f of list) files.push({ name: f.name, kind: fileKind(f.name), data: new Uint8Array(await f.arrayBuffer()) });
+  openMany(files, 'place');
 });
 
 // --- Обновления -------------------------------------------------------------
@@ -2286,9 +2740,16 @@ api.onUpdateStatus((s) => {
 
 api.version().then((v) => { $('version').textContent = v; });
 api.modelStatus().then((s) => { S.modelReady = s.ready; });
+loadTemplateList();
+
+function setTheme(t) {
+  if (t) document.body.dataset.theme = t; else delete document.body.dataset.theme;
+  api.setSettings({ theme: t });
+  resize();
+}
 api.settings().then((s) => {
-  im.setDefaults(s.adjustDefault);
   if (s.guides === false) S.guides = false;
+  if (s.theme) { document.body.dataset.theme = s.theme; resize(); }
 });
 
 refreshOptions();

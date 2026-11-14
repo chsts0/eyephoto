@@ -1,12 +1,28 @@
 // Вся работа с пикселями: проявка, резкость, сужение зрачка, заплатки нейронкой,
 // размеры листов и раскладки студии.
 
-// Заводские настройки проявки. Студия может заменить их своими:
-// кнопка «Сделать стандартом» в окне проявки.
-export const FACTORY_ADJUST = { temp: -20, tint: 0, exp: 0, contrast: 10, sat: 12, detail: 45 };
-export const NEUTRAL_ADJUST = { temp: 0, tint: 0, exp: 0, contrast: 0, sat: 0, detail: 0 };
-export const defaults = { ...FACTORY_ADJUST };
-export function setDefaults(v) { Object.assign(defaults, FACTORY_ADJUST, v || {}); }
+// Настройки проявки по образцу Camera Raw. Студия всегда держит текстуру и
+// резкость на максимуме, поэтому detail всегда 100 и в окне его нет.
+// Всё остальное по умолчанию на нуле и крутится руками.
+export const HSL_COLORS = ['Красные', 'Оранжевые', 'Жёлтые', 'Зелёные', 'Голубые', 'Синие', 'Фиолетовые', 'Пурпурные'];
+const HSL_CENTERS = [0, 30, 60, 120, 180, 240, 270, 300];
+const zeros = () => [0, 0, 0, 0, 0, 0, 0, 0];
+export const newAdjust = () => ({
+  v: 2, exp: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
+  temp: 0, tint: 0, vibrance: 0, sat: 0, hsl: { h: zeros(), s: zeros(), l: zeros() }, detail: 100,
+});
+export const NEUTRAL_ADJUST = { ...newAdjust(), detail: 0 };
+
+// Приводит настройки любой версии к нынешнему виду.
+export function normalizeAdjust(a) {
+  const n = newAdjust();
+  if (!a) return n;
+  const out = { ...n, ...a, hsl: { h: zeros(), s: zeros(), l: zeros() } };
+  if (a.hsl) for (const k of ['h', 's', 'l']) out.hsl[k] = (a.hsl[k] || zeros()).slice(0, 8);
+  if (!a.v) out.exp = (a.exp || 0) / 50; // раньше яркость была от -100 до 100 на ±2 ступени
+  out.v = 2;
+  return out;
+}
 
 // Доля от радиуса радужки, которую занимает зрачок в готовом снимке.
 // Взято из шаблонов студии: зрачок 600 px при радужке 2512 px.
@@ -35,21 +51,46 @@ const FINE_PX = 3, COARSE_PX = 12.5, A_FINE = 1.3, A_COARSE = 1.4;
 const toLin = (v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
 const toSrgb = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 
+// Тоновые таблицы на каждый канал: баланс белого и экспозиция в линейном свете,
+// потом белые и чёрные точки.
 function buildLuts(p) {
   const t = p.temp / 100, u = p.tint / 100;
   const r = 1 + 0.45 * t, g = 1 - 0.25 * u, b = 1 - 0.45 * t;
   const norm = 0.2126 * r + 0.7152 * g + 0.0722 * b; // чтобы баланс не менял яркость
-  const gain = Math.pow(2, p.exp / 100 * 2); // ползунок ±100 = ±2 ступени
-  const k = p.contrast / 100;
+  const gain = Math.pow(2, p.exp);
+  const bp = -p.blacks / 100 * 0.12, wp = 1 - p.whites / 100 * 0.12;
   return [r, g, b].map((m) => {
     const lut = new Float32Array(256);
     for (let i = 0; i < 256; i++) {
       let x = toSrgb(Math.min(1, toLin(i / 255) * (m / norm) * gain));
-      x -= k * Math.sin(2 * Math.PI * x) / (2 * Math.PI); // S-кривая, середина круче
-      lut[i] = Math.max(0, Math.min(1, x)) * 255;
+      x = (x - bp) / (wp - bp);
+      lut[i] = Math.max(0, Math.min(1, x));
     }
     return lut;
   });
+}
+
+// Контрастность: S-кривая вокруг середины, одна на все каналы.
+function contrastLut(c) {
+  const k = c / 100 * 0.55, lut = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const x = i / 255;
+    lut[i] = Math.max(0, Math.min(1, x - k * Math.sin(2 * Math.PI * x) / (2 * Math.PI))) * 255;
+  }
+  return lut;
+}
+
+// Смешение цветов: вес каждой из восьми полос для оттенка h (в градусах).
+function hueWeights(h, out) {
+  out.fill(0);
+  for (let i = 0; i < 8; i++) {
+    const c = HSL_CENTERS[i], next = HSL_CENTERS[(i + 1) % 8] + (i === 7 ? 360 : 0);
+    let d = h - c;
+    if (d < 0) d += 360;
+    const span = next - c;
+    if (d < span) { const t = d / span; out[i] += 1 - t; out[(i + 1) % 8] += t; return out; }
+  }
+  return out;
 }
 
 function blurred(src, radius) {
@@ -63,34 +104,72 @@ function blurred(src, radius) {
 // Возвращает проявленную копию слоя. Прозрачность не меняется.
 // scale < 1 даёт уменьшенный черновик: для больших снимков и для живого
 // предпросмотра, пока тянут ползунок.
-export function applyAdjust(src, p, scale = 1) {
+// blurScale — во сколько раз картинка уже уменьшена относительно исходника
+// (нужно, когда пересчитывается кусок уже уменьшенной копии).
+export function applyAdjust(src, p0, scale = 1, blurScale = scale) {
+  const p = normalizeAdjust(p0);
   const w = Math.max(8, Math.round(src.width * scale)), h = Math.max(8, Math.round(src.height * scale));
   const out = makeCanvas(w, h);
   const x = out.getContext('2d', { willReadFrequently: true });
-  x.imageSmoothingQuality = 'high';
+  // 1:1 без сглаживания, иначе картинка слегка мылится ещё до проявки
+  if (w === src.width && h === src.height) x.imageSmoothingEnabled = false;
+  else x.imageSmoothingQuality = 'high';
   x.drawImage(src, 0, 0, w, h);
   const img = x.getImageData(0, 0, w, h), d = img.data;
-  const [lr, lg, lb] = buildLuts(p);
-  const sat = 1 + p.sat / 100, a = p.detail / 100;
+  const [lr, lg, lb] = buildLuts(p), cl = contrastLut(p.contrast);
+  const sat = 1 + p.sat / 100, vib = p.vibrance / 100, a = p.detail / 100;
+  const sh = p.shadows / 100, hi = p.highlights / 100;
+  const hsl = p.hsl, useHsl = [...hsl.h, ...hsl.s, ...hsl.l].some((v) => v), wts = new Float32Array(8);
   // Резкость считаем только по яркости, а цвет берём слегка размытый.
   // Так усиливается рисунок волокон, а цветной шум матрицы не вылезает.
-  const fine = blurred(out, Math.max(0.5, FINE_PX * scale));
-  const coarse = a > 0 ? blurred(out, Math.max(1.5, COARSE_PX * scale)) : null;
+  const fine = blurred(out, Math.max(0.5, FINE_PX * blurScale));
+  const coarse = a > 0 ? blurred(out, Math.max(1.5, COARSE_PX * blurScale)) : null;
   const clamp = (v) => (v < 0 ? 0 : v > 255 ? 255 : v) | 0;
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] === 0) continue;
-    const L = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const L0 = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     const Lf = 0.299 * fine[i] + 0.587 * fine[i + 1] + 0.114 * fine[i + 2];
-    let add = L - Lf;
+    let add = L0 - Lf;
     if (coarse) {
       const Lc = 0.299 * coarse[i] + 0.587 * coarse[i + 1] + 0.114 * coarse[i + 2];
-      add += a * (A_FINE * (L - Lf) + A_COARSE * (L - Lc));
+      add += a * (A_FINE * (L0 - Lf) + A_COARSE * (L0 - Lc));
     }
-    const r = lr[clamp(fine[i] + add)], g = lg[clamp(fine[i + 1] + add)], b = lb[clamp(fine[i + 2] + add)];
-    const l = 0.299 * r + 0.587 * g + 0.114 * b;
-    d[i] = l + (r - l) * sat;
-    d[i + 1] = l + (g - l) * sat;
-    d[i + 2] = l + (b - l) * sat;
+    let r = lr[clamp(fine[i] + add)], g = lg[clamp(fine[i + 1] + add)], b = lb[clamp(fine[i + 2] + add)];
+    // светлые и тени: двигаем яркость в своём диапазоне, цвет не трогаем
+    if (sh || hi) {
+      const L = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (L > 0.0005) {
+        const L2 = Math.max(0, L + sh * 0.6 * L * (1 - L) * (1 - L) + hi * 0.6 * L * L * (1 - L));
+        const k = L2 / L;
+        r *= k; g *= k; b *= k;
+      }
+    }
+    r = cl[clamp(r * 255)]; g = cl[clamp(g * 255)]; b = cl[clamp(b * 255)];
+    // насыщенность и красочность (красочность сильнее тянет бледные цвета)
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), s0 = mx > 0 ? (mx - mn) / mx : 0;
+    const f = sat * (1 + vib * (1 - s0));
+    if (f !== 1) {
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
+      r = l + (r - l) * f; g = l + (g - l) * f; b = l + (b - l) * f;
+    }
+    if (useHsl && s0 > 0.02) {
+      const R = clamp(r) / 255, G = clamp(g) / 255, B = clamp(b) / 255;
+      const M = Math.max(R, G, B), m = Math.min(R, G, B), c = M - m;
+      let hh = c === 0 ? 0 : M === R ? ((G - B) / c) % 6 : M === G ? (B - R) / c + 2 : (R - G) / c + 4;
+      hh *= 60; if (hh < 0) hh += 360;
+      hueWeights(hh, wts);
+      let dh = 0, ds = 0, dl = 0;
+      for (let k = 0; k < 8; k++) if (wts[k]) { dh += wts[k] * hsl.h[k]; ds += wts[k] * hsl.s[k]; dl += wts[k] * hsl.l[k]; }
+      const strength = Math.min(1, s0 * 4); // серое не трогаем
+      let H2 = (hh + dh / 100 * 30 * strength + 360) % 360;
+      let S2 = Math.max(0, Math.min(1, (M ? c / M : 0) * (1 + ds / 100 * strength)));
+      let V2 = Math.max(0, Math.min(1, M * (1 + dl / 100 * 0.5 * strength)));
+      const C2 = V2 * S2, X = C2 * (1 - Math.abs(((H2 / 60) % 2) - 1)), m2 = V2 - C2;
+      const seg = Math.floor(H2 / 60);
+      const rgb = seg === 0 ? [C2, X, 0] : seg === 1 ? [X, C2, 0] : seg === 2 ? [0, C2, X] : seg === 3 ? [0, X, C2] : seg === 4 ? [X, 0, C2] : [C2, 0, X];
+      r = (rgb[0] + m2) * 255; g = (rgb[1] + m2) * 255; b = (rgb[2] + m2) * 255;
+    }
+    d[i] = r; d[i + 1] = g; d[i + 2] = b;
   }
   x.putImageData(img, 0, 0);
   return out;
@@ -176,8 +255,38 @@ export function findPupil(canvas) {
 
 const PINCH_AMOUNT = 0.2;  // сила одного прохода, как в панели студии
 const PINCH_ZONE = 0.62;   // зона стягивания, доля от радиуса радужки
-const PINCH_OVERSHOOT = 0.9; // текстура заходит чуть под чёрный круг
+const PINCH_OVERSHOOT_V = 0.9; // текстура заходит чуть под чёрный круг
 const PINCH_MAX_PASSES = 40;
+// Край чёрного зрачка: середина перехода и его ширина в долях радиуса зрачка.
+// Подобрано по снимку, обработанному в фотошопе панелью студии.
+// Профиль яркости вышел почти как у фотошопа: среднее отклонение 3% против 11% раньше.
+const PUPIL_EDGE_CENTER = 0.95, PUPIL_EDGE_SIGMA = 0.12;
+
+// Приближение функции ошибок, точности хватает с запасом.
+function erf(x) {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return x >= 0 ? y : -y;
+}
+
+function fillPupil(x, cx, cy, c, sigma) {
+  sigma = Math.max(0.8, sigma);
+  const R = c + sigma * 4, W = x.canvas.width, H = x.canvas.height;
+  const x0 = Math.max(0, Math.floor(cx - R)), y0 = Math.max(0, Math.floor(cy - R));
+  const x1 = Math.min(W, Math.ceil(cx + R)), y1 = Math.min(H, Math.ceil(cy + R));
+  if (x1 <= x0 || y1 <= y0) return;
+  const img = x.getImageData(x0, y0, x1 - x0, y1 - y0), d = img.data, w = x1 - x0;
+  const k = 1 / (sigma * Math.SQRT2);
+  for (let yy = y0; yy < y1; yy++) {
+    for (let xx = x0; xx < x1; xx++) {
+      const rho = Math.hypot(xx + 0.5 - cx, yy + 0.5 - cy);
+      if (rho > R) continue;
+      const black = 0.5 * (1 - erf((rho - c) * k)), keep = 1 - black, i = ((yy - y0) * w + (xx - x0)) * 4;
+      d[i] *= keep; d[i + 1] *= keep; d[i + 2] *= keep;
+    }
+  }
+  x.putImageData(img, x0, y0);
+}
 
 function pinchZone(pupil, R) {
   return Math.max(R * PINCH_ZONE, pupil.r * 1.6);
@@ -204,7 +313,7 @@ export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO) {
   const rect = pupilRect(canvas, pupil, R);
   const { zone } = rect;
   const x = canvas.getContext('2d');
-  const a = target * PINCH_OVERSHOOT / zone, edge = pupil.r / zone;
+  const a = target * PINCH_OVERSHOOT_V / zone, edge = pupil.r / zone;
   let passes = 0;
   for (let v = a; v < edge && passes < PINCH_MAX_PASSES; passes++) v = pinchOnce(v);
   if (passes > 0 && rect.w > 2 && rect.h > 2) {
@@ -238,20 +347,9 @@ export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO) {
     }
     x.putImageData(dst, rect.x, rect.y);
   }
-  // Чёрный зрачок с мягким краем: растушёвка 5% от диаметра, как в панели студии.
-  const f = Math.max(3, target * 0.1), r0 = Math.max(0, target - f), r1 = target + f;
-  const grad = x.createRadialGradient(pupil.x, pupil.y, r0, pupil.x, pupil.y, r1);
-  for (let i = 0; i <= 8; i++) {
-    const t = i / 8, e = 1 - t * t * (3 - 2 * t);
-    grad.addColorStop(t, `rgba(0,0,0,${e})`);
-  }
-  x.save();
-  x.globalCompositeOperation = 'source-atop';
-  x.fillStyle = grad;
-  x.beginPath();
-  x.arc(pupil.x, pupil.y, r1, 0, Math.PI * 2);
-  x.fill();
-  x.restore();
+  // Чёрный зрачок с мягким краем. Растушёвка в фотошопе даёт плавный переход
+  // по нормальному закону, поэтому и здесь край считается так же.
+  fillPupil(x, pupil.x, pupil.y, target * PUPIL_EDGE_CENTER, target * PUPIL_EDGE_SIGMA);
   return rect;
 }
 

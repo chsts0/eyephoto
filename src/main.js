@@ -164,14 +164,14 @@ ipcMain.handle('open-file', async (_e, what) => {
   const res = await dialog.showOpenDialog(win, {
     title: what === 'photo' ? 'Поместить снимок' : 'Открыть',
     defaultPath: await todaysSourceFolder(),
-    properties: ['openFile'],
+    properties: ['openFile', 'multiSelections'],
     filters: [{ name: what === 'photo' ? 'Снимки' : 'Снимки и шаблоны', extensions: ext }],
   });
   if (res.canceled || !res.filePaths.length) return null;
   if (!PSD_EXT.includes(path.extname(res.filePaths[0]).slice(1).toLowerCase())) {
     await saveSettings({ lastOpenDir: path.dirname(res.filePaths[0]) });
   }
-  return readFile(res.filePaths[0]);
+  return Promise.all(res.filePaths.map(readFile));
 });
 
 // Только для автотестов: открыть файл по пути без диалога.

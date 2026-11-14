@@ -250,7 +250,7 @@ body.no-doc .dock > * { opacity: .35; pointer-events: none; }
 .sl.off { opacity: .4; pointer-events: none; }
 
 /* Окно проявки */
-.dev { position: fixed; inset: 0; z-index: 35; display: grid; grid-template-columns: 1fr 320px; background: #0c0d0e; }
+.dev { position: fixed; inset: 0; z-index: 35; display: grid; grid-template-columns: 1fr 340px; background: #0c0d0e; }
 .dev-view { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 #devCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .dev-tools { position: absolute; left: 16px; bottom: 16px; display: flex; align-items: center; gap: 14px; padding: 5px 12px 5px 5px; background: #24262a; border: 1px solid var(--edge); border-radius: 7px; }
@@ -262,7 +262,17 @@ body.no-doc .dock > * { opacity: .35; pointer-events: none; }
 .dev-body h4 { margin: 18px 0 9px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
 .dev-body .sl { margin-bottom: 10px; }
 .dev-side > footer { padding: 12px 16px 16px; border-top: 1px solid var(--edge); background: var(--bar); }
-.dev-links { display: flex; justify-content: space-between; margin-bottom: 12px; }
+.dev-note { margin: 0 0 12px; color: var(--faint); font-size: 11px; }
+.dev-histo { display: block; width: calc(100% - 32px); height: 75px; margin: 2px 16px 6px; border-radius: 4px; background: #121315; }
+.dev-sec > summary { list-style: none; display: flex; align-items: center; gap: 8px; margin: 14px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #b3b8c0; cursor: default; }
+.dev-sec > summary::-webkit-details-marker { display: none; }
+.dev-sec > summary::before { content: ''; width: 0; height: 0; border-left: 4px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; }
+.dev-sec[open] > summary::before { transform: rotate(90deg); }
+.dev-sub { margin: 4px 0 8px; font-size: 11px; color: var(--dim); }
+.dev-body .seg { margin: 0 0 12px; }
+.dev-body .seg button { flex: 1; }
+.sl.colored .sl-range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--track); }
+.sl.colored .sl-range::-webkit-slider-thumb { margin-top: -3px; }
 .dev-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dev-actions .btn { height: 30px; }
 
@@ -285,3 +295,98 @@ body.bare .center { grid-template-rows: 1fr; }
 .opt-select { display: flex; align-items: center; gap: 7px; color: var(--dim); }
 .opt-select select { height: 22px; padding: 0 6px; border: 1px solid #3a3d44; border-radius: var(--r); background: var(--ctl); color: var(--text); font: inherit; outline: 0; }
 .opt-select select:focus { border-color: var(--accent); }
+.tpl-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+.tpl-btn { height: 24px; max-width: 100%; padding: 0 9px; border: 1px solid var(--rule); border-radius: 12px; background: var(--bar); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tpl-btn:hover { border-color: var(--accent); }
+
+/* ===================== Оформление =====================
+   Три варианта, переключаются в меню «Просмотр → Оформление».
+   «Графит» — основной. «Студия» — плавающие карточки в духе Affinity.
+   «Стекло» — полупрозрачные панели с размытием поверх мягкого фона. */
+
+body[data-theme="studio"] {
+  --stage: #141416;
+  --bar: #1f1f23;
+  --panel: #232328;
+  --ctl: #2e2e34;
+  --ctl-hi: #393940;
+  --edge: #121214;
+  --rule: #303036;
+  --accent: #e8a948;
+  --accent-ink: #20160a;
+  --r: 6px;
+  background: #0f0f11;
+  gap: 6px;
+  padding: 0 6px 6px;
+  grid-template-columns: 44px 1fr 296px;
+}
+body[data-theme="studio"] .menubar { margin: 0 -6px; border-bottom: 0; }
+body[data-theme="studio"] .optbar,
+body[data-theme="studio"] .tools,
+body[data-theme="studio"] .center,
+body[data-theme="studio"] .dock,
+body[data-theme="studio"] .status { border: 1px solid var(--edge); border-radius: 10px; overflow: hidden; }
+body[data-theme="studio"] .tools { padding: 8px 0; gap: 3px; }
+body[data-theme="studio"] .tool { width: 34px; height: 32px; border-radius: 8px; }
+body[data-theme="studio"] .tool.on { background: var(--accent); color: var(--accent-ink); }
+body[data-theme="studio"] .dock { background: transparent; border: 0; gap: 6px; }
+body[data-theme="studio"] .dock > .panel { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; overflow: hidden; }
+body[data-theme="studio"] .panel > header { background: transparent; border-bottom-color: var(--rule); height: 30px; }
+body[data-theme="studio"] .panel h3 { color: var(--text); letter-spacing: .04em; }
+body[data-theme="studio"] .tab.on { box-shadow: inset 0 -2px 0 var(--accent); }
+body[data-theme="studio"] .layer.on, body[data-theme="studio"] .hist.on { background: #3a3122; }
+body[data-theme="studio"] .eye-chip.on { background: #3a3122; }
+body[data-theme="studio"] .btn.primary:hover { background: #f0bb65; }
+body[data-theme="studio"] .status { margin-top: -2px; }
+
+body[data-theme="glass"] {
+  --stage: rgba(10, 12, 16, .55);
+  --bar: rgba(255, 255, 255, .04);
+  --panel: rgba(28, 31, 38, .52);
+  --ctl: rgba(255, 255, 255, .08);
+  --ctl-hi: rgba(255, 255, 255, .14);
+  --edge: rgba(255, 255, 255, .07);
+  --rule: rgba(255, 255, 255, .08);
+  --text: #e6e9ee;
+  --dim: #a1a8b3;
+  --faint: #6c7480;
+  --accent: #7cc4ff;
+  --accent-ink: #061524;
+  --r: 8px;
+  gap: 8px;
+  padding: 0 8px 8px;
+  grid-template-columns: 46px 1fr 300px;
+  background:
+    radial-gradient(60% 70% at 12% 18%, rgba(64, 132, 196, .55), transparent 70%),
+    radial-gradient(55% 60% at 88% 82%, rgba(214, 140, 52, .42), transparent 70%),
+    radial-gradient(40% 50% at 70% 10%, rgba(120, 90, 210, .35), transparent 70%),
+    #0c0e13;
+}
+body[data-theme="glass"] .menubar { margin: 0 -8px; background: rgba(12, 14, 18, .45); border-bottom: 1px solid var(--edge); backdrop-filter: blur(20px); }
+body[data-theme="glass"] .optbar,
+body[data-theme="glass"] .tools,
+body[data-theme="glass"] .center,
+body[data-theme="glass"] .dock > .panel,
+body[data-theme="glass"] .status {
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-radius: 14px;
+  overflow: hidden;
+  backdrop-filter: blur(24px) saturate(150%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 8px 30px rgba(0, 0, 0, .25);
+}
+body[data-theme="glass"] .dock { background: transparent; border: 0; gap: 8px; }
+body[data-theme="glass"] .tools { padding: 8px 0; gap: 3px; }
+body[data-theme="glass"] .tool { width: 34px; height: 32px; border-radius: 9px; }
+body[data-theme="glass"] .tool.on { background: rgba(124, 196, 255, .22); color: #cfe9ff; box-shadow: inset 0 0 0 1px rgba(124, 196, 255, .45); }
+body[data-theme="glass"] .panel > header { background: transparent; border-bottom-color: var(--rule); height: 30px; }
+body[data-theme="glass"] .panel h3 { color: #d7dce4; }
+body[data-theme="glass"] .tabs { background: rgba(0, 0, 0, .18); }
+body[data-theme="glass"] .tab.on { background: rgba(255, 255, 255, .06); }
+body[data-theme="glass"] .layer.on, body[data-theme="glass"] .hist.on, body[data-theme="glass"] .eye-chip.on { background: rgba(124, 196, 255, .16); }
+body[data-theme="glass"] .layer { border-bottom-color: rgba(255, 255, 255, .04); }
+body[data-theme="glass"] .menu-pop, body[data-theme="glass"] .modal-box, body[data-theme="glass"] .ctxbar, body[data-theme="glass"] .toast {
+  background: rgba(30, 33, 40, .72); border-color: rgba(255, 255, 255, .1); backdrop-filter: blur(24px) saturate(150%);
+}
+body[data-theme="glass"] .home { background: transparent; }
+body[data-theme="glass"] .card { background: rgba(255, 255, 255, .05); border-color: rgba(255, 255, 255, .08); }

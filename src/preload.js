@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('eyephoto', {
   setDirty: (v) => ipcRenderer.send('set-dirty', v),
 
   settings: () => ipcRenderer.invoke('settings-get'),
+  setSettings: (patch) => ipcRenderer.invoke('settings-set', patch),
   chooseSaveRoot: () => ipcRenderer.invoke('choose-save-root'),
   saveJpeg: (payload) => ipcRenderer.invoke('save-jpeg', payload),
 

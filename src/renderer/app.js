@@ -6,7 +6,9 @@ const api = window.eyephoto;
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
 const canvas = $('canvas');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false });
+const over = $('overlay');
+const octx = over.getContext('2d');
 
 const ACCENT = '#5aa2e0';
 const RAW_RE = /\.(arw|dng|cr2|cr3|nef|raf|rw2|orf)$/i;
@@ -37,6 +39,8 @@ const S = {
   stampSrc: null,     // откуда берёт штамп
   ants: 0,
   lastFormat: 'A5',
+  guides: true,       // направляющие по центру листа
+  wheeling: false,    // крутят колесо: рисуем быстро, начисто после остановки
   tab: 'layers',
 };
 window.__eyephoto = S;
@@ -51,12 +55,17 @@ function setBusy(text) {
   return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 }
 
-let drawQueued = false;
-function requestDraw() {
+// Картинка листа и служебные линии (курсор, выделение, рамки, направляющие)
+// рисуются на разных холстах. Пока меняются только линии, лист не пересобирается:
+// это главное, от чего зависит плавность.
+let drawQueued = false, sceneDirty = true;
+function schedule() {
   if (drawQueued) return;
   drawQueued = true;
-  requestAnimationFrame(draw);
+  requestAnimationFrame(frame);
 }
+function requestDraw() { sceneDirty = true; schedule(); }
+function requestOverlay() { schedule(); }
 
 const layer = () => (S.cur ? D.activeLayer(S.cur) : null);
 
@@ -72,8 +81,8 @@ function paintLayer() {
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(stage.clientWidth * dpr);
-  canvas.height = Math.round(stage.clientHeight * dpr);
+  over.width = canvas.width = Math.round(stage.clientWidth * dpr);
+  over.height = canvas.height = Math.round(stage.clientHeight * dpr);
   if (S.cur && !S.cur.view.fitted) fit();
   draw();
 }
@@ -116,80 +125,113 @@ const checker = (() => {
 })();
 
 function strokeBoth(px, dash) {
-  ctx.setLineDash([]);
-  ctx.lineWidth = px;
-  ctx.strokeStyle = 'rgba(0,0,0,.8)';
-  ctx.stroke();
-  if (dash) { ctx.setLineDash([4 * px, 4 * px]); ctx.lineDashOffset = -S.ants * px; }
-  ctx.strokeStyle = '#fff';
-  ctx.stroke();
-  ctx.setLineDash([]);
+  octx.setLineDash([]);
+  octx.lineWidth = px;
+  octx.strokeStyle = 'rgba(0,0,0,.8)';
+  octx.stroke();
+  if (dash) { octx.setLineDash([4 * px, 4 * px]); octx.lineDashOffset = -S.ants * px; }
+  octx.strokeStyle = '#fff';
+  octx.stroke();
+  octx.setLineDash([]);
 }
 
 function ring(c, color, handles) {
   const px = 1 / S.cur.view.scale;
-  ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-  ctx.lineWidth = 3 * px; ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.stroke();
-  ctx.lineWidth = 1.25 * px; ctx.strokeStyle = color; ctx.stroke();
+  octx.beginPath(); octx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+  octx.lineWidth = 3 * px; octx.strokeStyle = 'rgba(0,0,0,.55)'; octx.stroke();
+  octx.lineWidth = 1.25 * px; octx.strokeStyle = color; octx.stroke();
   if (!handles) return;
-  ctx.fillStyle = color;
+  octx.fillStyle = color;
   for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    ctx.beginPath(); ctx.arc(c.x + dx * c.r, c.y + dy * c.r, 3.5 * px, 0, Math.PI * 2); ctx.fill();
+    octx.beginPath(); octx.arc(c.x + dx * c.r, c.y + dy * c.r, 3.5 * px, 0, Math.PI * 2); octx.fill();
   }
 }
 
-function draw() {
+function draw() { sceneDirty = true; frame(); }
+
+function frame() {
   drawQueued = false;
+  if (sceneDirty) { drawScene(); sceneDirty = false; }
+  drawOverlay();
+}
+
+let settle = 0;
+
+function drawScene() {
   const dpr = window.devicePixelRatio || 1, d = S.cur;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#101113';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (!d) return;
-  const v = d.view, px = 1 / v.scale;
-
+  const v = d.view;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = checker;
   ctx.fillRect(v.ox, v.oy, d.w * v.scale, d.h * v.scale);
 
   ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.ox, dpr * v.oy);
   ctx.imageSmoothingEnabled = v.scale < 4; // при сильном увеличении показываем честные пиксели
-  ctx.imageSmoothingQuality = 'high';
+  // Пока картинку двигают или крутят колесо, рисуем быстрым сглаживанием,
+  // а как только остановились, перерисовываем начисто.
+  const moving = !!S.drag || S.wheeling;
+  ctx.imageSmoothingQuality = moving ? 'low' : 'high';
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, d.w, d.h); ctx.clip();
-  D.composite(ctx, d, { draftId: S.draftId });
+  D.composite(ctx, d, { draftId: S.draftId, zoom: v.scale * dpr });
   ctx.restore();
+  if (S.wheeling) {
+    clearTimeout(settle);
+    settle = setTimeout(() => { S.wheeling = false; requestDraw(); }, 160);
+  }
+}
+
+function drawOverlay() {
+  const dpr = window.devicePixelRatio || 1, d = S.cur;
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.clearRect(0, 0, over.width, over.height);
+  if (!d) return;
+  const v = d.view, px = 1 / v.scale, g = S.drag;
+  octx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.ox, dpr * v.oy);
+
+  if (S.guides) {
+    octx.beginPath();
+    octx.moveTo(d.w / 2, 0); octx.lineTo(d.w / 2, d.h);
+    octx.moveTo(0, d.h / 2); octx.lineTo(d.w, d.h / 2);
+    octx.lineWidth = px;
+    octx.strokeStyle = 'rgba(0, 225, 255, .85)';
+    octx.stroke();
+  }
 
   // выделение: «бегущие муравьи»
   const shapes = d.sel ? d.sel.shapes.slice() : [];
-  const g = S.drag;
   if (g && g.shape) shapes.push(g.shape);
   for (const s of shapes) {
-    ctx.beginPath();
-    D.shapePath(ctx, s);
+    octx.beginPath();
+    D.shapePath(octx, s);
     strokeBoth(px, true);
   }
 
   if (g && g.type === 'patch') {
-    ctx.beginPath();
-    g.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-    if (g.pts.length === 1) ctx.lineTo(g.pts[0].x + 0.01, g.pts[0].y);
-    ctx.lineJoin = ctx.lineCap = 'round';
-    ctx.lineWidth = g.size;
-    ctx.strokeStyle = 'rgba(90, 162, 224, .45)';
-    ctx.stroke();
+    octx.beginPath();
+    g.pts.forEach((p, i) => (i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)));
+    if (g.pts.length === 1) octx.lineTo(g.pts[0].x + 0.01, g.pts[0].y);
+    octx.lineJoin = octx.lineCap = 'round';
+    octx.lineWidth = g.size;
+    octx.strokeStyle = 'rgba(90, 162, 224, .45)';
+    octx.stroke();
   }
 
   if (S.tool === 'move') {
     const act = D.activeLayers(d).filter((l) => !l.locked && l.visible);
     for (const l of act) {
       const c = D.corners(l);
-      ctx.beginPath();
-      c.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-      ctx.closePath();
-      ctx.lineWidth = px; ctx.strokeStyle = ACCENT; ctx.stroke();
+      octx.beginPath();
+      c.forEach((p, i) => (i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)));
+      octx.closePath();
+      octx.lineWidth = px; octx.strokeStyle = ACCENT; octx.stroke();
       if (act.length === 1) {
         for (const p of c) {
-          ctx.fillStyle = '#fff'; ctx.strokeStyle = ACCENT;
-          ctx.beginPath(); ctx.rect(p.x - 3.5 * px, p.y - 3.5 * px, 7 * px, 7 * px); ctx.fill(); ctx.stroke();
+          octx.fillStyle = '#fff'; octx.strokeStyle = ACCENT;
+          octx.beginPath(); octx.rect(p.x - 3.5 * px, p.y - 3.5 * px, 7 * px, 7 * px); octx.fill(); octx.stroke();
         }
       }
     }
@@ -200,8 +242,8 @@ function draw() {
 
   if (S.tool === 'stamp' && S.stampSrc) {
     const p = g && g.type === 'stroke' && g.srcNow ? g.srcNow : S.stampSrc, a = 7 * px;
-    ctx.beginPath();
-    ctx.moveTo(p.x - a, p.y); ctx.lineTo(p.x + a, p.y); ctx.moveTo(p.x, p.y - a); ctx.lineTo(p.x, p.y + a);
+    octx.beginPath();
+    octx.moveTo(p.x - a, p.y); octx.lineTo(p.x + a, p.y); octx.moveTo(p.x, p.y - a); octx.lineTo(p.x, p.y + a);
     strokeBoth(px, false);
   }
 
@@ -209,8 +251,15 @@ function draw() {
   if (sized && S.cursor && !(g && g.type === 'pan')) ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 }, '#fff', false);
 }
 
+// Прилипание к направляющим по центру листа.
+function snapToCenter(p) {
+  const d = S.cur, tol = 7 / d.view.scale;
+  if (!S.guides) return p;
+  return { x: Math.abs(p.x - d.w / 2) < tol ? d.w / 2 : p.x, y: Math.abs(p.y - d.h / 2) < tol ? d.h / 2 : p.y };
+}
+
 setInterval(() => {
-  if (S.cur && (S.cur.sel || (S.drag && S.drag.shape))) { S.ants = (S.ants + 1) % 8; requestDraw(); }
+  if (S.cur && (S.cur.sel || (S.drag && S.drag.shape))) { S.ants = (S.ants + 1) % 8; requestOverlay(); }
 }, 110);
 
 // --- Документы и вкладки ----------------------------------------------------
@@ -369,17 +418,27 @@ function sheetDoc(key) {
 }
 
 // Кладёт снимок слоем в текущий документ, вписывая его в лист.
-function placeCanvas(doc, c, name, photo) {
+// pupil — найденный на снимке зрачок. Если он есть, снимок ставится так, чтобы
+// зрачок попал в центр листа, и сразу появляется круг по радужке: его остаётся
+// подправить за край и вырезать.
+function placeCanvas(doc, c, name, adjust, pupil) {
   const k = Math.min(doc.w / c.width, doc.h / c.height, 1);
+  const found = !!(pupil && pupil.found);
   D.structEdit(doc, 'Поместить снимок', () => {
     const l = D.makeLayer({
-      name: name.replace(/\.[^.]+$/, ''), canvas: c, cx: doc.w / 2, cy: doc.h / 2, scale: k,
-      kind: photo ? 'photo' : 'pixel',
-      adjust: photo ? { ...im.DEFAULT_ADJUST } : null,
+      name: name.replace(/\.[^.]+$/, ''), canvas: c, scale: k, kind: 'photo', adjust,
+      cx: doc.w / 2 - (found ? (pupil.x - c.width / 2) * k : 0),
+      cy: doc.h / 2 - (found ? (pupil.y - c.height / 2) * k : 0),
     });
     doc.layers.push(l);
     doc.active = [l.id];
   });
+  doc.sel = null;
+  if (found) {
+    const m = Math.min(c.width, c.height);
+    const r = Math.min(m * 0.46, Math.max(m * 0.15, pupil.r * 3.3)) * k;
+    doc.sel = { shapes: [{ type: 'ellipse', cx: doc.w / 2, cy: doc.h / 2, rx: r, ry: r }], feather: S.opts.marquee.feather };
+  }
 }
 
 // file: { name, kind: raw | image | psd, data }. how: 'place' — слоем в текущий документ,
@@ -394,15 +453,20 @@ async function openData(file, how) {
       if (skipped) ui.toast(`Не перенесено слоёв: ${skipped}. Корректирующие слои и эффекты пока не поддерживаются`);
     } else {
       const c = file.kind === 'raw' ? await decodeRaw(file.data) : await decodeImage(file.data);
+      const pupil = im.findPupil(c);
+      setBusy('');
+      // сначала окно проявки, как Camera Raw в фотошопе
+      const adjust = await developDialog(c, { ...im.defaults }, file.name, pupil);
+      if (!adjust) return;
       if (how === 'open') {
         const doc = D.makeDoc({ name: file.name.replace(/\.[^.]+$/, ''), w: c.width, h: c.height, dpi: 300, background: false });
         addDoc(doc);
-        placeCanvas(doc, c, file.name, true);
+        placeCanvas(doc, c, file.name, adjust, null);
         doc.undo = []; doc.changed = false;
       } else {
         if (!S.cur) addDoc(sheetDoc(S.lastFormat));
         showHome(false);
-        placeCanvas(S.cur, c, file.name, true);
+        placeCanvas(S.cur, c, file.name, adjust, pupil);
         fit();
         setTool('marquee'); // первым делом снимок обводят кругом по радужке
       }
@@ -615,7 +679,7 @@ function copyToLayer() {
     });
     d.layers.splice(d.layers.indexOf(l) + 1, 0, made);
     d.active = [made.id];
-    if (isEye) l.visible = false; // исходник после вырезания на листе больше не нужен
+    if (isEye) { l.visible = false; l.cache = null; l.dirty = true; } // исходник на листе больше не нужен, память под его копию тоже
   });
   d.sel = null;
   S.pupil = null;
@@ -863,7 +927,7 @@ const TOOLS = [
   ['brush', 'Кисть', 'B', 'Рисует выбранным цветом на активном слое'],
   ['eraser', 'Ластик', 'E', 'Стирает пиксели активного слоя до прозрачности'],
   ['burn', 'Затемнитель', 'O', 'Каждый проход делает темнее. С Alt осветляет'],
-  ['pupil', 'Зрачок', 'P', 'Поставьте круг по краю зрачка и нажмите «Сузить зрачок» или Enter'],
+  ['pupil', 'Зрачок', 'P', 'Поставьте круг по краю зрачка: мышкой или ползунком справа. Потом «Сузить зрачок» или Enter'],
   '-',
   ['hand', 'Рука', 'H', 'Двигает картинку. То же самое делает пробел с любым инструментом'],
   ['zoom', 'Масштаб', 'Z', 'Щелчок приближает, Alt+щелчок отдаляет. Колесо работает всегда'],
@@ -883,7 +947,7 @@ function initPupil() {
   const l = layer();
   if (!l || !l.visible) { S.pupil = null; return; }
   if (S.pupil && S.pupil.layerId === l.id) return;
-  const g = im.guessPupil(l.canvas);
+  const g = im.findPupil(l.canvas);
   S.pupil = { layerId: l.id, x: g.x, y: g.y, r: g.r };
 }
 
@@ -898,7 +962,7 @@ function pupilOnDoc() {
 function setTool(id) {
   S.tool = id;
   S.drag = null;
-  if (id === 'pupil') initPupil();
+  if (id === 'pupil') { initPupil(); syncPupilPanel(); }
   refreshOptions();
   refreshStatus();
   canvas.style.cursor = id === 'hand' ? 'grab' : id === 'zoom' ? 'zoom-in' : id === 'move' || id === 'pupil' ? 'default' : 'crosshair';
@@ -920,6 +984,49 @@ function applyPupil() {
   refresh(); requestDraw();
 }
 
+// Панель «Зрачок» справа, по образцу панели студии для фотошопа:
+// ползунок задаёт, где сейчас край зрачка, кнопка сужает его до стандартного.
+const pupilUi = {};
+(() => {
+  const box = $('pupilBody');
+  pupilUi.now = ui.slider({
+    label: 'Зрачок сейчас', min: 8, max: 80, step: 0.5, unit: '%', value: 30,
+    onInput: (v) => {
+      const l = layer();
+      if (!l) return;
+      if (S.tool !== 'pupil') setTool('pupil');
+      if (!S.pupil) return;
+      S.pupil.r = v / 100 * Math.min(l.canvas.width, l.canvas.height) / 2;
+      requestOverlay();
+    },
+  });
+  pupilUi.to = ui.slider({
+    label: 'Сделать', min: 12, max: 40, step: 0.5, unit: '%', value: S.opts.pupil.ratio, reset: 23.5,
+    onInput: (v) => { S.opts.pupil.ratio = v; },
+  });
+  pupilUi.go = ui.el('button', 'btn primary wide', 'Сузить зрачок');
+  pupilUi.go.onclick = () => { if (S.tool !== 'pupil') setTool('pupil'); applyPupil(); };
+  pupilUi.note = ui.el('p', 'panel-note', '');
+  box.append(pupilUi.now, pupilUi.to, pupilUi.go, pupilUi.note);
+})();
+
+function syncPupilPanel() {
+  const l = layer();
+  if (S.pupil && l && S.pupil.layerId === l.id) {
+    pupilUi.now.set(Math.round(S.pupil.r / (Math.min(l.canvas.width, l.canvas.height) / 2) * 200) / 2);
+  }
+}
+
+function refreshPupilPanel() {
+  const l = layer(), ok = !!(l && l.visible && l.kind !== 'photo');
+  pupilUi.go.disabled = !ok;
+  pupilUi.now.classList.toggle('off', !ok);
+  pupilUi.to.classList.toggle('off', !ok);
+  pupilUi.note.textContent = ok ? 'Размер считается от ширины радужки. Круг на картинке двигается мышкой.'
+    : l && l.kind === 'photo' ? 'Сначала вырежьте глаз: круг по радужке и Ctrl+J.' : 'Выберите слой с глазом.';
+  syncPupilPanel();
+}
+
 // Мазок кистью, ластиком, штампом или затемнителем. Рисуем сразу в пиксели слоя.
 function beginStroke(l, mode, p, e) {
   const o = S.opts[S.tool];
@@ -936,6 +1043,7 @@ function beginStroke(l, mode, p, e) {
     g.off = { x: a.x - b.x, y: a.y - b.y };
     g.srcDelta = { x: S.stampSrc.x - p.x, y: S.stampSrc.y - p.y };
   }
+  l.live = true;
   S.drag = g;
   dab(g, p);
 }
@@ -994,6 +1102,7 @@ const STROKE_NAMES = { paint: 'Кисть', erase: 'Ластик', burn: 'Зат
 
 function endStroke(g) {
   const l = g.layer, b = g.box;
+  l.live = false;
   const x = Math.max(0, Math.floor(b.x0)), y = Math.max(0, Math.floor(b.y0));
   const w = Math.min(l.canvas.width, Math.ceil(b.x1)) - x, h = Math.min(l.canvas.height, Math.ceil(b.y1)) - y;
   if (w > 0 && h > 0) {
@@ -1059,7 +1168,10 @@ canvas.addEventListener('pointerdown', (e) => {
     const one = soleEllipse(), h = one && !e.shiftKey ? circleHit({ x: one.cx, y: one.cy, r: Math.max(one.rx, one.ry) }, p) : '';
     if (h === 'edge') S.drag = { type: 'selresize', s: one, k: one.ry / one.rx };
     else if (h === 'in') S.drag = { type: 'selmove', s: one, dx: p.x - one.cx, dy: p.y - one.cy };
-    else S.drag = { type: 'marquee', start: p, add: e.shiftKey, shape: { type: 'ellipse', cx: p.x, cy: p.y, rx: 0, ry: 0 } };
+    else {
+      const start = o.center ? snapToCenter(p) : p;
+      S.drag = { type: 'marquee', start, add: e.shiftKey, shape: { type: 'ellipse', cx: start.x, cy: start.y, rx: 0, ry: 0 } };
+    }
   } else if (S.tool === 'lasso') {
     S.drag = { type: 'lasso', add: e.shiftKey, shape: { type: 'poly', pts: [p], sub: e.altKey } };
   } else if (S.tool === 'pupil') {
@@ -1094,7 +1206,7 @@ canvas.addEventListener('pointermove', (e) => {
       const h = one ? circleHit(S.tool === 'pupil' ? one : { x: one.cx, y: one.cy, r: Math.max(one.rx, one.ry) }, p) : '';
       canvas.style.cursor = h === 'edge' ? 'nwse-resize' : h === 'in' ? 'move' : S.tool === 'pupil' ? 'default' : 'crosshair';
     }
-    if (S.opts[S.tool] && S.opts[S.tool].size) requestDraw();
+    if (S.opts[S.tool] && S.opts[S.tool].size) requestOverlay();
     return;
   }
   if (g.type === 'pan') {
@@ -1103,6 +1215,10 @@ canvas.addEventListener('pointermove', (e) => {
     let dx = p.x - g.start.x, dy = p.y - g.start.y;
     if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
     for (const m of g.layers) { m.l.cx = m.x + dx; m.l.cy = m.y + dy; }
+    if (g.layers.length === 1 && !e.ctrlKey) {
+      const l = g.layers[0].l, c = snapToCenter({ x: l.cx, y: l.cy });
+      l.cx = c.x; l.cy = c.y;
+    }
     g.moved = true;
   } else if (g.type === 'scale') {
     const l = g.layer, a = e.altKey ? g.c0 : g.anchor;
@@ -1130,7 +1246,8 @@ canvas.addEventListener('pointermove', (e) => {
       s.cx = g.start.x + w / 2; s.cy = g.start.y + h / 2; s.rx = Math.abs(w) / 2; s.ry = Math.abs(h) / 2;
     }
   } else if (g.type === 'selmove') {
-    g.s.cx = p.x - g.dx; g.s.cy = p.y - g.dy;
+    const c = snapToCenter({ x: p.x - g.dx, y: p.y - g.dy });
+    g.s.cx = c.x; g.s.cy = c.y;
   } else if (g.type === 'selresize') {
     g.s.rx = Math.max(4, Math.hypot(p.x - g.s.cx, p.y - g.s.cy)); g.s.ry = g.s.rx * g.k;
   } else if (g.type === 'lasso' || g.type === 'patch') {
@@ -1144,7 +1261,9 @@ canvas.addEventListener('pointermove', (e) => {
   } else if (g.type === 'stroke') {
     strokeTo(g, p);
   }
-  requestDraw();
+  // лист пересобираем, только если менялось то, что на нём нарисовано
+  if (['pan', 'move', 'scale', 'rotate', 'stroke'].includes(g.type)) requestDraw(); else requestOverlay();
+  if (g.type === 'pupilresize') syncPupilPanel();
 });
 
 function endDrag(e) {
@@ -1171,11 +1290,12 @@ function endDrag(e) {
 }
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
-canvas.addEventListener('pointerleave', () => { S.cursor = null; if (!S.drag) requestDraw(); });
+canvas.addEventListener('pointerleave', () => { S.cursor = null; if (!S.drag) requestOverlay(); });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const r = canvas.getBoundingClientRect();
+  S.wheeling = true;
   zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.15 : 1 / 1.15);
 }, { passive: false });
 
@@ -1245,7 +1365,6 @@ function refreshOptions() {
     add(seg);
     size(); range('Сила', 'flow', 1, 100, '%');
   } else if (S.tool === 'pupil') {
-    range('Размер зрачка', 'ratio', 12, 40, '%', 0.5);
     button('Сузить зрачок', applyPupil, true);
   } else {
     button('Вписать в окно', fit);
@@ -1256,59 +1375,130 @@ function refreshOptions() {
 
 // --- Панели справа ----------------------------------------------------------
 
-const ADJUST = [
-  ['temp', 'Теплее / холоднее', -100, 100], ['tint', 'Оттенок', -100, 100], ['exp', 'Яркость', -100, 100],
-  ['contrast', 'Контраст', -50, 80], ['sat', 'Насыщенность', -100, 100], ['detail', 'Детали', 0, 200],
+// Окно проявки: большой предпросмотр и ручки справа, как Camera Raw.
+// Открывается при вставке снимка и по Ctrl+Shift+A для выбранного слоя.
+// Считается только то, что видно на экране, поэтому ручки отзываются сразу.
+const DEV_GROUPS = [
+  ['Баланс белого', [['temp', 'Температура', -100, 100], ['tint', 'Оттенок', -100, 100]]],
+  ['Свет', [['exp', 'Экспозиция', -100, 100], ['contrast', 'Контрастность', -50, 80]]],
+  ['Цвет и детали', [['sat', 'Насыщенность', -100, 100], ['detail', 'Текстура и резкость', 0, 200]]],
 ];
-const adjustRows = {};
-let adjustCommit = null;
-const developOn = ui.el('div');
-const developOff = ui.el('div');
-for (const [key, label, min, max] of ADJUST) {
-  adjustRows[key] = ui.slider({
-    label, min, max, value: 0, reset: im.DEFAULT_ADJUST[key],
-    onInput: (v) => {
-      const l = layer();
-      if (!l || !l.adjust) return;
-      if (!adjustCommit) adjustCommit = D.beginStruct(S.cur);
-      l.adjust[key] = v;
-      l.dirty = true;
-      S.draftId = l.id; // пока тянут ползунок, считаем уменьшенный черновик
-      requestDraw();
-    },
-    onChange: () => {
-      const l = layer();
-      S.draftId = 0;
-      if (l) l.dirty = true;
-      if (adjustCommit) { adjustCommit('Проявка'); adjustCommit = null; }
-      refreshHistory(); refreshTabs(); requestDraw();
-    },
-  });
-  developOn.appendChild(adjustRows[key]);
-}
-$('develop').append(developOn, developOff);
+const dev = { rows: {}, src: null, p: null, zoom: 'fit', center: null, done: null, raf: 0, pan: null };
 
-function setAdjust(next, name) {
-  const d = S.cur, l = layer();
-  if (!d || !l) return;
-  D.structEdit(d, name, () => { l.adjust = next; l.dirty = true; });
-  refresh(); requestDraw();
-}
-$('developReset').onclick = () => { if (layer() && layer().adjust) setAdjust({ ...im.DEFAULT_ADJUST }, 'Сбросить проявку'); };
-
-function refreshDevelop() {
-  const l = layer(), on = !!(l && l.adjust);
-  developOn.hidden = !on;
-  developOff.hidden = on;
-  $('developReset').hidden = !on;
-  if (on) { for (const [key] of ADJUST) adjustRows[key].set(l.adjust[key]); return; }
-  developOff.textContent = '';
-  developOff.appendChild(ui.el('p', 'panel-note', l ? 'Этот слой не проявляется: цвет и резкость показаны как есть.' : 'Выберите слой, чтобы настроить цвет и резкость.'));
-  if (l && !l.locked) {
-    const b = ui.el('button', 'btn', 'Включить проявку');
-    b.onclick = () => setAdjust({ ...im.NEUTRAL_ADJUST }, 'Включить проявку');
-    developOff.appendChild(b);
+for (const [title, rows] of DEV_GROUPS) {
+  $('devBody').appendChild(ui.el('h4', '', title));
+  for (const [key, label, min, max] of rows) {
+    dev.rows[key] = ui.slider({
+      label, min, max, value: 0, reset: im.FACTORY_ADJUST[key],
+      onInput: (v) => { dev.p[key] = v; cancelAnimationFrame(dev.raf); dev.raf = requestAnimationFrame(() => devRender(true)); },
+      onChange: () => { cancelAnimationFrame(dev.raf); devRender(false); },
+    });
+    $('devBody').appendChild(dev.rows[key]);
   }
+}
+
+function devRender(draft) {
+  if (!dev.src) return;
+  const view = $('devView'), cv = $('devCanvas'), vw = view.clientWidth, vh = view.clientHeight;
+  if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
+  const x = cv.getContext('2d'), W = dev.src.width, H = dev.src.height, raw = $('devBefore').checked;
+  const q = draft ? 0.5 : 1; // пока тянут ручку, считаем вдвое грубее
+  x.fillStyle = '#0c0d0e';
+  x.fillRect(0, 0, vw, vh);
+  x.imageSmoothingQuality = 'high';
+  if (dev.zoom === 'fit') {
+    const k = Math.min((vw - 48) / W, (vh - 48) / H, 1);
+    const out = raw ? dev.src : im.applyAdjust(dev.src, dev.p, k * q);
+    x.drawImage(out, (vw - W * k) / 2, (vh - H * k) / 2, W * k, H * k);
+  } else {
+    const cw = Math.min(W, vw), ch = Math.min(H, vh);
+    const sx = Math.round(Math.max(0, Math.min(W - cw, dev.center.x - cw / 2)));
+    const sy = Math.round(Math.max(0, Math.min(H - ch, dev.center.y - ch / 2)));
+    const part = im.makeCanvas(cw, ch);
+    part.getContext('2d').drawImage(dev.src, sx, sy, cw, ch, 0, 0, cw, ch);
+    const out = raw ? part : im.applyAdjust(part, dev.p, q);
+    x.drawImage(out, (vw - cw) / 2, (vh - ch) / 2, cw, ch);
+  }
+}
+
+function devSync() {
+  for (const key of Object.keys(dev.rows)) dev.rows[key].set(dev.p[key]);
+  document.querySelectorAll('#devZoom button').forEach((b) => b.classList.toggle('on', b.dataset.z === dev.zoom));
+  $('devCanvas').style.cursor = dev.zoom === 'fit' ? 'zoom-in' : 'grab';
+}
+
+function developDialog(src, adjust, name, pupil) {
+  dev.src = src;
+  dev.p = { ...adjust };
+  dev.zoom = 'fit';
+  dev.center = pupil && pupil.found ? { x: pupil.x, y: pupil.y } : { x: src.width / 2, y: src.height / 2 };
+  $('devName').textContent = name;
+  $('devBefore').checked = false;
+  $('dev').hidden = false;
+  devSync();
+  devRender(false);
+  return new Promise((resolve) => {
+    dev.done = (result) => {
+      $('dev').hidden = true;
+      dev.src = dev.done = null;
+      resolve(result);
+    };
+  });
+}
+
+$('devOk').onclick = () => dev.done && dev.done({ ...dev.p });
+$('devCancel').onclick = () => dev.done && dev.done(null);
+$('devBefore').onchange = () => devRender(false);
+$('devReset').onclick = () => { dev.p = { ...im.defaults }; devSync(); devRender(false); };
+$('devStd').onclick = () => {
+  im.setDefaults(dev.p);
+  api.setSettings({ adjustDefault: { ...dev.p } });
+  ui.toast('Запомнил. Новые снимки будут открываться с этими настройками');
+};
+document.querySelectorAll('#devZoom button').forEach((b) => {
+  b.onclick = () => { dev.zoom = b.dataset.z; devSync(); devRender(false); };
+});
+// Щелчок по картинке переключает «целиком» и 100%, в 100% картинку можно таскать.
+$('devCanvas').addEventListener('pointerdown', (e) => {
+  if (dev.zoom === 'fit') {
+    const view = $('devView'), W = dev.src.width, H = dev.src.height;
+    const k = Math.min((view.clientWidth - 48) / W, (view.clientHeight - 48) / H, 1);
+    const r = e.target.getBoundingClientRect();
+    dev.center = { x: (e.clientX - r.left - (view.clientWidth - W * k) / 2) / k, y: (e.clientY - r.top - (view.clientHeight - H * k) / 2) / k };
+    dev.zoom = 'one';
+    devSync(); devRender(false);
+    return;
+  }
+  e.target.setPointerCapture(e.pointerId);
+  dev.pan = { x: e.clientX, y: e.clientY, moved: false };
+});
+$('devCanvas').addEventListener('pointermove', (e) => {
+  if (!dev.pan) return;
+  const dx = e.clientX - dev.pan.x, dy = e.clientY - dev.pan.y;
+  if (Math.abs(dx) + Math.abs(dy) < 2) return;
+  dev.center.x = Math.max(0, Math.min(dev.src.width, dev.center.x - dx));
+  dev.center.y = Math.max(0, Math.min(dev.src.height, dev.center.y - dy));
+  dev.pan = { x: e.clientX, y: e.clientY, moved: true };
+  cancelAnimationFrame(dev.raf);
+  dev.raf = requestAnimationFrame(() => devRender(true));
+});
+$('devCanvas').addEventListener('pointerup', () => {
+  if (!dev.pan) return;
+  const moved = dev.pan.moved;
+  dev.pan = null;
+  if (!moved) { dev.zoom = 'fit'; devSync(); }
+  devRender(false);
+});
+window.addEventListener('resize', () => { if (dev.src) devRender(false); });
+
+// Проявка выбранного слоя. Исходные пиксели не меняются, настройки можно открыть снова.
+async function developLayer() {
+  const d = S.cur, l = layer();
+  if (!d || !l) { ui.toast('Выберите слой в панели «Слои»'); return; }
+  const res = await developDialog(l.canvas, l.adjust ? { ...l.adjust } : { ...im.NEUTRAL_ADJUST }, l.name, null);
+  if (!res) return;
+  D.structEdit(d, 'Проявка', () => { l.adjust = res; D.touch(l); });
+  refresh(); requestDraw();
 }
 
 let dragLayerId = 0;
@@ -1463,7 +1653,7 @@ function refresh() {
   refreshTabs();
   refreshLayers();
   refreshHistory();
-  refreshDevelop();
+  refreshPupilPanel();
   refreshStatus();
   refreshActions();
   refreshCtx();
@@ -1471,6 +1661,7 @@ function refresh() {
   $('docHint').hidden = !d || !$('home').hidden || d.layers.some((l) => l.kind === 'photo' || l.kind === 'eye');
   $('saveBtn').disabled = $('placeBtn').disabled = false;
   $('saveBtn').disabled = !d;
+  $('developBtn').disabled = !layer();
 }
 
 // Кнопки рядом с выделением. Главная та, которая обычно нужна дальше:
@@ -1542,6 +1733,12 @@ const CMD = {
   deselect: { label: 'Снять выделение', keys: 'Ctrl+D', enabled: hasSel, run: () => { S.cur.sel = null; refresh(); requestDraw(); } },
   neural: { label: 'Убрать выделенное нейронкой', keys: 'Shift+Backspace', run: removeSelection, enabled: hasSel },
 
+  develop: { label: 'Проявка…', keys: 'Ctrl+Shift+A', run: developLayer, enabled: hasLayer },
+  guides: { label: 'Направляющие по центру', keys: 'Ctrl+;', run: () => {
+    S.guides = !S.guides;
+    api.setSettings({ guides: S.guides });
+    requestOverlay();
+  } },
   fit: { label: 'Вписать в окно', keys: 'Ctrl+0', run: fit, enabled: has },
   actual: { label: 'Реальный размер, 100%', keys: 'Ctrl+1', run: () => zoomAt(...center(), 1, 1), enabled: has },
   zoomIn: { label: 'Приблизить', keys: 'Ctrl+=', run: () => zoomAt(...center(), 1.25), enabled: has },
@@ -1553,18 +1750,27 @@ ui.menubar($('menus'), [
   { title: 'Правка', items: ['undo', 'redo', '-', 'transform', 'clear'] },
   { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
-  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut'] },
+  { title: 'Фильтр', items: ['develop', 'neural'] },
+  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides'] },
 ], CMD);
 
 const run = (id) => { const c = CMD[id]; if (!S.busy && (!c.enabled || c.enabled())) c.run(); };
 $('placeBtn').onclick = () => run('place');
 $('saveBtn').onclick = () => run('save');
+$('developBtn').onclick = () => run('develop');
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.filter((t) => t !== '-').map((t) => [t[2], t[0]]));
 const BY_KEYS = Object.fromEntries(Object.entries(CMD).filter(([, c]) => c.keys).map(([id, c]) => [c.keys, id]));
 
 window.addEventListener('keydown', (e) => {
   if (!$('modal').hidden) return;
+  if (dev.done) {
+    // открыто окно проявки: работают только «готово» и «отмена»
+    const typingNum = e.target.tagName === 'INPUT' && e.target.type === 'text';
+    if (e.key === 'Enter' && !typingNum) { e.preventDefault(); dev.done({ ...dev.p }); }
+    if (e.key === 'Escape') { e.preventDefault(); dev.done(null); }
+    return;
+  }
   const typing = e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox';
   const k = ui.combo(e);
   if (typing && !k.startsWith('Ctrl+')) return;
@@ -1641,6 +1847,10 @@ api.onUpdateStatus((s) => {
 
 api.version().then((v) => { $('version').textContent = v; });
 api.modelStatus().then((s) => { S.modelReady = s.ready; });
+api.settings().then((s) => {
+  im.setDefaults(s.adjustDefault);
+  if (s.guides === false) S.guides = false;
+});
 
 refreshOptions();
 refresh();

@@ -117,7 +117,8 @@ body.no-doc .tool { color: var(--faint); pointer-events: none; }
 
 .stage { position: relative; overflow: hidden; min-width: 0; min-height: 0; }
 .stage.drag::after { content: ""; position: absolute; inset: 8px; border: 1px dashed var(--accent); border-radius: 6px; pointer-events: none; z-index: 5; }
-#canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#canvas, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#overlay { pointer-events: none; }
 
 .ctxbar { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; gap: 1px; padding: 3px; background: #24262a; border: 1px solid var(--edge); border-radius: 7px; box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }
 .ctxbar button { height: 26px; padding: 0 12px; border: 0; border-radius: var(--r); background: none; }
@@ -244,3 +245,23 @@ body.no-doc .dock > * { opacity: .35; pointer-events: none; }
 .hint b { color: var(--text); font-size: 13px; font-weight: 600; }
 .layer-lock { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: none; color: var(--faint); }
 .layer-lock:hover { background: var(--ctl-hi); color: var(--text); }
+
+.btn.wide { width: 100%; margin: 4px 0 8px; }
+.sl.off { opacity: .4; pointer-events: none; }
+
+/* Окно проявки */
+.dev { position: fixed; inset: 0; z-index: 35; display: grid; grid-template-columns: 1fr 320px; background: #0c0d0e; }
+.dev-view { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+#devCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.dev-tools { position: absolute; left: 16px; bottom: 16px; display: flex; align-items: center; gap: 14px; padding: 5px 12px 5px 5px; background: #24262a; border: 1px solid var(--edge); border-radius: 7px; }
+.dev-side { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-left: 1px solid var(--edge); }
+.dev-side > header { display: flex; align-items: baseline; gap: 10px; height: 40px; padding: 12px 16px 0; }
+.dev-side h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.dev-side > header span { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 16px; }
+.dev-body h4 { margin: 18px 0 9px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.dev-body .sl { margin-bottom: 10px; }
+.dev-side > footer { padding: 12px 16px 16px; border-top: 1px solid var(--edge); background: var(--bar); }
+.dev-links { display: flex; justify-content: space-between; margin-bottom: 12px; }
+.dev-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.dev-actions .btn { height: 30px; }

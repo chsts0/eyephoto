@@ -1,8 +1,12 @@
 // Вся работа с пикселями: проявка, резкость, сужение зрачка, заплатки нейронкой,
 // размеры листов и раскладки студии.
 
-export const DEFAULT_ADJUST = { temp: -20, tint: 0, exp: 0, contrast: 20, sat: 25, detail: 100 };
+// Заводские настройки проявки. Студия может заменить их своими:
+// кнопка «Сделать стандартом» в окне проявки.
+export const FACTORY_ADJUST = { temp: -20, tint: 0, exp: 0, contrast: 10, sat: 12, detail: 45 };
 export const NEUTRAL_ADJUST = { temp: 0, tint: 0, exp: 0, contrast: 0, sat: 0, detail: 0 };
+export const defaults = { ...FACTORY_ADJUST };
+export function setDefaults(v) { Object.assign(defaults, FACTORY_ADJUST, v || {}); }
 
 // Доля от радиуса радужки, которую занимает зрачок в готовом снимке.
 // Взято из шаблонов студии: зрачок 600 px при радужке 2512 px.
@@ -26,7 +30,7 @@ export function cloneCanvas(src) {
 // Радиусы размытия в пикселях исходника и сила двух слоёв резкости.
 // Подобрано так, чтобы «Детали 100» давали вид, близкий к Camera Raw
 // с текстурой 100 и резкостью 150, которыми студия пользовалась в фотошопе.
-const FINE_PX = 3, COARSE_PX = 12.5, A_FINE = 1.6, A_COARSE = 1.4;
+const FINE_PX = 3, COARSE_PX = 12.5, A_FINE = 1.3, A_COARSE = 1.4;
 
 const toLin = (v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
 const toSrgb = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
@@ -92,34 +96,104 @@ export function applyAdjust(src, p, scale = 1) {
   return out;
 }
 
-// --- Поиск зрачка (стартовая подсказка, круг всегда двигается руками) --------
+// --- Поиск зрачка -----------------------------------------------------------
+// Зрачок на макроснимке это самое тёмное крупное круглое пятно. Перебираем
+// несколько порогов яркости и среди тёмных пятен берём самое круглое, плотное
+// и контрастное с тем, что вокруг. Блики внутри зрачка не мешают: пятно
+// оценивается по своим границам. Это подсказка, круг всегда правится руками.
 
-export function guessPupil(canvas) {
-  const n = 160;
-  const c = makeCanvas(n, n);
-  const x = c.getContext('2d', { willReadFrequently: true });
-  x.drawImage(canvas, 0, 0, n, n);
-  const d = x.getImageData(0, 0, n, n).data;
-  let sx = 0, sy = 0, cnt = 0;
-  for (let y = 0; y < n; y++) {
-    for (let xx = 0; xx < n; xx++) {
-      if (Math.hypot(xx - n / 2, y - n / 2) > n * 0.3) continue;
-      const i = (y * n + xx) * 4;
-      if (d[i + 3] > 200 && Math.max(d[i], d[i + 1], d[i + 2]) < 26) { sx += xx; sy += y; cnt++; }
+export function findPupil(canvas) {
+  const W0 = canvas.width, H0 = canvas.height, k = 320 / Math.max(W0, H0);
+  const w = Math.max(8, Math.round(W0 * k)), h = Math.max(8, Math.round(H0 * k)), n = w * h;
+  const c = makeCanvas(w, h), x = c.getContext('2d', { willReadFrequently: true });
+  x.filter = 'blur(1.2px)';
+  x.drawImage(canvas, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data;
+  const g = new Uint8Array(n), hist = new Uint32Array(256);
+  let opaque = 0;
+  for (let i = 0; i < n; i++) {
+    const a = d[i * 4 + 3];
+    // прозрачное считаем светлым, чтобы пустые углы вырезанного глаза не сошли за зрачок
+    g[i] = a < 200 ? 255 : (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8;
+    if (a >= 200) { hist[g[i]]++; opaque++; }
+  }
+  const fallback = { x: W0 / 2, y: H0 / 2, r: Math.min(W0, H0) * 0.1, found: false };
+  if (opaque < 100) return fallback;
+  const label = new Int32Array(n), stack = new Int32Array(n);
+  let best = null;
+  for (const pct of [1, 2, 3, 5, 8, 12, 18, 25, 33]) {
+    let acc = 0, thr = 0;
+    while (thr < 255 && acc + hist[thr] < opaque * pct / 100) acc += hist[thr++];
+    label.fill(0);
+    let id = 0;
+    for (let s0 = 0; s0 < n; s0++) {
+      if (label[s0] || g[s0] > thr) continue;
+      id++;
+      let top = 0, area = 0, sx = 0, sy = 0, sum = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+      stack[top++] = s0; label[s0] = id;
+      while (top) {
+        const i = stack[--top], px = i % w, py = (i - px) / w;
+        area++; sx += px; sy += py; sum += g[i];
+        if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+        if (px > 0 && !label[i - 1] && g[i - 1] <= thr) { label[i - 1] = id; stack[top++] = i - 1; }
+        if (px < w - 1 && !label[i + 1] && g[i + 1] <= thr) { label[i + 1] = id; stack[top++] = i + 1; }
+        if (py > 0 && !label[i - w] && g[i - w] <= thr) { label[i - w] = id; stack[top++] = i - w; }
+        if (py < h - 1 && !label[i + w] && g[i + w] <= thr) { label[i + w] = id; stack[top++] = i + w; }
+      }
+      const frac = area / n, bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+      if (frac < 0.002 || frac > 0.45) continue;
+      if (x0 === 0 || y0 === 0 || x1 === w - 1 || y1 === h - 1) continue; // у края кадра это тень, а не зрачок
+      const aspect = Math.min(bw, bh) / Math.max(bw, bh);
+      if (aspect < 0.6) continue;
+      const r = (bw + bh) / 4, fill = area / (Math.PI * r * r);
+      if (fill < 0.6 || fill > 1.3) continue;
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, inside = sum / area;
+      // яркость кольца вокруг пятна: у зрачка там радужка, она заметно светлее
+      let ring = 0, cnt = 0;
+      for (let a = 0; a < 24; a++) {
+        const rx = Math.round(cx + Math.cos(a * Math.PI / 12) * r * 1.5), ry = Math.round(cy + Math.sin(a * Math.PI / 12) * r * 1.5);
+        if (rx < 0 || ry < 0 || rx >= w || ry >= h) continue;
+        ring += g[ry * w + rx]; cnt++;
+      }
+      if (cnt < 12) continue;
+      const contrast = (ring / cnt - inside) / 255;
+      if (contrast < 0.04) continue;
+      const central = 1 - Math.min(1, Math.hypot(cx - w / 2, cy - h / 2) / (Math.hypot(w, h) / 2));
+      const score = 1.2 * aspect + 0.8 * Math.min(fill, 1 / fill) + 1.5 * contrast - 0.5 * inside / 255 + 0.3 * central;
+      if (!best || score > best.score) best = { score, x: sx / area + 0.5, y: sy / area + 0.5, r };
     }
   }
-  const kx = canvas.width / n, ky = canvas.height / n, m = Math.min(canvas.width, canvas.height);
-  if (cnt < 40) return { x: canvas.width / 2, y: canvas.height / 2, r: m * 0.1, found: false };
-  return { x: (sx / cnt + 0.5) * kx, y: (sy / cnt + 0.5) * ky, r: Math.sqrt(cnt * kx * ky / Math.PI) * 1.15, found: true };
+  if (!best) return fallback;
+  return { x: best.x / k, y: best.y / k, r: best.r / k * 1.04, found: true };
 }
 
 // --- Сужение зрачка ---------------------------------------------------------
-// Текстура радужки стягивается к центру зрачка, затем поверх ставится чёрный
-// круг нужного размера с мягким краем. Меняет холст на месте.
-// R — радиус радужки, ratio — какую долю от него должен занять зрачок.
+// Работает как фильтр «Дисторсия» в фотошопе, которым студия пользовалась
+// в своей панели: круглая зона вокруг зрачка стягивается к центру слабыми
+// проходами, пока край зрачка не уйдёт под чёрный круг нужного размера.
+// Проходы складываются в одну формулу, поэтому картинка пересчитывается
+// один раз и не мылится. R — радиус радужки, ratio — доля зрачка от него.
+
+const PINCH_AMOUNT = 0.2;  // сила одного прохода, как в панели студии
+const PINCH_ZONE = 0.62;   // зона стягивания, доля от радиуса радужки
+const PINCH_OVERSHOOT = 0.9; // текстура заходит чуть под чёрный круг
+const PINCH_MAX_PASSES = 40;
+
+function pinchZone(pupil, R) {
+  return Math.max(R * PINCH_ZONE, pupil.r * 1.6);
+}
+
+// Один проход: точка на расстоянии r (в долях зоны) берёт цвет с расстояния pinchOnce(r).
+// У края зоны эффект плавно сходит на нет, как у выделения с растушёвкой.
+function pinchOnce(r) {
+  if (r <= 0 || r >= 1) return r;
+  const src = Math.min(1, r * Math.pow(Math.sin(Math.PI / 2 * r), -PINCH_AMOUNT));
+  const t = Math.max(0, Math.min(1, (1 - r) / 0.07)), m = t * t * (3 - 2 * t);
+  return r + (src - r) * m;
+}
 
 export function pupilRect(canvas, pupil, R) {
-  const zone = Math.min(R * 0.97, Math.max(R * 0.62, pupil.r * 1.5));
+  const zone = pinchZone(pupil, R);
   const x0 = Math.max(0, Math.floor(pupil.x - zone - 2)), y0 = Math.max(0, Math.floor(pupil.y - zone - 2));
   const x1 = Math.min(canvas.width, Math.ceil(pupil.x + zone + 2)), y1 = Math.min(canvas.height, Math.ceil(pupil.y + zone + 2));
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, zone };
@@ -130,26 +204,28 @@ export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO) {
   const rect = pupilRect(canvas, pupil, R);
   const { zone } = rect;
   const x = canvas.getContext('2d');
-  const a = target * 0.9; // текстура заходит чуть под чёрный круг
-  if (pupil.r > a && rect.w > 2 && rect.h > 2) {
+  const a = target * PINCH_OVERSHOOT / zone, edge = pupil.r / zone;
+  let passes = 0;
+  for (let v = a; v < edge && passes < PINCH_MAX_PASSES; passes++) v = pinchOnce(v);
+  if (passes > 0 && rect.w > 2 && rect.h > 2) {
+    // таблица «откуда брать» для каждого расстояния от центра
+    const N = 2048, map = new Float32Array(N + 1);
+    for (let i = 0; i <= N; i++) {
+      let v = i / N;
+      for (let p = 0; p < passes; p++) v = pinchOnce(v);
+      map[i] = v;
+    }
     const src = x.getImageData(rect.x, rect.y, rect.w, rect.h);
     const dst = x.createImageData(rect.w, rect.h);
     const s = src.data, o = dst.data, W = rect.w, H = rect.h;
     const cx = pupil.x - rect.x, cy = pupil.y - rect.y;
-    const m0 = (zone - pupil.r) / (zone - a), span = zone - a;
     for (let yy = 0; yy < H; yy++) {
       for (let xx = 0; xx < W; xx++) {
         const dx = xx - cx, dy = yy - cy, rho = Math.hypot(dx, dy);
         let fx = xx, fy = yy;
         if (rho < zone && rho > 0.001) {
-          let sr;
-          if (rho <= a) sr = rho * pupil.r / a;
-          else {
-            // плавная кривая: у края зоны переходит в «ничего не трогать»
-            const t = (rho - a) / span, t2 = t * t, t3 = t2 * t;
-            sr = (2 * t3 - 3 * t2 + 1) * pupil.r + (t3 - 2 * t2 + t) * m0 * span
-              + (-2 * t3 + 3 * t2) * zone + (t3 - t2) * span;
-          }
+          const u = rho / zone * N, i0 = Math.floor(u), f = u - i0;
+          const sr = (map[i0] * (1 - f) + map[Math.min(N, i0 + 1)] * f) * zone;
           fx = cx + dx * sr / rho; fy = cy + dy * sr / rho;
         }
         const ix = Math.max(0, Math.min(W - 2, Math.floor(fx))), iy = Math.max(0, Math.min(H - 2, Math.floor(fy)));
@@ -162,15 +238,18 @@ export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO) {
     }
     x.putImageData(dst, rect.x, rect.y);
   }
-  const f = Math.max(2, target * 0.1);
-  const grad = x.createRadialGradient(pupil.x, pupil.y, Math.max(0, target - f), pupil.x, pupil.y, target + f * 0.5);
-  grad.addColorStop(0, '#000');
-  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  // Чёрный зрачок с мягким краем: растушёвка 5% от диаметра, как в панели студии.
+  const f = Math.max(3, target * 0.1), r0 = Math.max(0, target - f), r1 = target + f;
+  const grad = x.createRadialGradient(pupil.x, pupil.y, r0, pupil.x, pupil.y, r1);
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8, e = 1 - t * t * (3 - 2 * t);
+    grad.addColorStop(t, `rgba(0,0,0,${e})`);
+  }
   x.save();
   x.globalCompositeOperation = 'source-atop';
   x.fillStyle = grad;
   x.beginPath();
-  x.arc(pupil.x, pupil.y, target + f, 0, Math.PI * 2);
+  x.arc(pupil.x, pupil.y, r1, 0, Math.PI * 2);
   x.fill();
   x.restore();
   return rect;

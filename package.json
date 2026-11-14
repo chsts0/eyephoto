@@ -1,7 +1,7 @@
 {
   "name": "eyephoto",
   "productName": "EyePhoto",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Редактор снимков радужки для студии",
   "main": "src/main.js",
   "author": "EyePhoto",

@@ -20,6 +20,7 @@ export function makeLayer(props) {
     cache: null,    // проявленная копия для показа
     cacheScale: 1,
     dirty: true,
+    rev: 0,         // растёт при каждом изменении вида слоя; по нему обновляются миниатюра и уменьшенная копия
     ...props,
   };
 }
@@ -103,10 +104,32 @@ export function hit(l, p) {
 
 // Большой снимок целиком проявляется в уменьшенном виде: этого хватает для
 // показа, а при сохранении всё считается в полном размере.
-const VIEW_LIMIT = 2600, DRAFT_LIMIT = 900;
+const VIEW_LIMIT = 2048, DRAFT_LIMIT = 900;
 
-export function layerView(l, draft = false) {
-  if (!l.adjust) return { canvas: l.canvas, k: 1 };
+// Отметить, что вид слоя изменился.
+export function touch(l) {
+  l.dirty = true;
+  l.rev++;
+}
+
+// zoom — сколько пикселей экрана приходится на пиксель листа.
+export function layerView(l, draft = false, zoom = 1) {
+  if (!l.adjust) {
+    // Большой слой, пока его не приблизили, рисуем уменьшенной копией:
+    // иначе каждое движение мышки таскало бы десятки мегапикселей.
+    const big = Math.max(l.canvas.width, l.canvas.height);
+    if (big <= 3000 || l.live) return { canvas: l.canvas, k: 1 };
+    const k = VIEW_LIMIT / big;
+    if (zoom * l.scale > k * 1.15) return { canvas: l.canvas, k: 1 };
+    if (!l.proxy || l.proxyRev !== l.rev) {
+      l.proxy = im.makeCanvas(l.canvas.width * k, l.canvas.height * k);
+      const x = l.proxy.getContext('2d');
+      x.imageSmoothingQuality = 'high';
+      x.drawImage(l.canvas, 0, 0, l.proxy.width, l.proxy.height);
+      l.proxyRev = l.rev;
+    }
+    return { canvas: l.proxy, k: l.proxy.width / l.canvas.width };
+  }
   const limit = draft ? DRAFT_LIMIT : VIEW_LIMIT;
   const k = Math.min(1, limit / Math.max(l.canvas.width, l.canvas.height));
   if (l.dirty || !l.cache || (!draft && l.cacheScale < k)) {
@@ -123,8 +146,8 @@ function layerFull(l) {
 
 // --- Сборка картинки --------------------------------------------------------
 
-function drawLayer(ctx, l, full, draft) {
-  const v = full ? { canvas: layerFull(l), k: 1 } : layerView(l, draft);
+function drawLayer(ctx, l, full, draft, zoom) {
+  const v = full ? { canvas: layerFull(l), k: 1 } : layerView(l, draft, zoom);
   ctx.save();
   layerToDocTransform(ctx, l, v.k);
   ctx.drawImage(v.canvas, 0, 0);
@@ -133,7 +156,7 @@ function drawLayer(ctx, l, full, draft) {
 
 // Рисует все видимые слои. На ctx уже должен стоять перевод «лист -> экран».
 // Слой с обтравкой виден только там, где есть пиксели слоя под ним.
-export function composite(ctx, doc, { full = false, draftId = 0 } = {}) {
+export function composite(ctx, doc, { full = false, draftId = 0, zoom = 1 } = {}) {
   const ls = doc.layers;
   for (let i = 0; i < ls.length; i++) {
     const base = ls[i];
@@ -145,17 +168,17 @@ export function composite(ctx, doc, { full = false, draftId = 0 } = {}) {
     ctx.globalAlpha = base.opacity;
     ctx.globalCompositeOperation = base.blend;
     if (!clipped.length) {
-      drawLayer(ctx, base, full, base.id === draftId);
+      drawLayer(ctx, base, full, base.id === draftId, zoom);
     } else {
       const tmp = im.makeCanvas(ctx.canvas.width, ctx.canvas.height);
       const t = tmp.getContext('2d');
       t.setTransform(ctx.getTransform());
       t.imageSmoothingQuality = ctx.imageSmoothingQuality;
-      drawLayer(t, base, full, base.id === draftId);
+      drawLayer(t, base, full, base.id === draftId, zoom);
       for (const l of clipped) {
         t.globalAlpha = l.opacity;
         t.globalCompositeOperation = l.blend === 'source-over' ? 'source-atop' : l.blend;
-        drawLayer(t, l, full, l.id === draftId);
+        drawLayer(t, l, full, l.id === draftId, zoom);
       }
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -176,9 +199,13 @@ export function flatten(doc, background = '#000') {
   return c;
 }
 
+// Миниатюра для панели слоёв. Пересчитывается только когда слой изменился.
 export function thumb(l, size) {
+  if (l.thumb && l.thumbRev === l.rev) return l.thumb;
   const c = im.makeCanvas(size, size), x = c.getContext('2d');
-  const v = l.cache && l.adjust ? l.cache : l.canvas;
+  const v = l.adjust ? (l.cache || l.canvas) : (l.proxy || l.canvas);
+  l.thumb = c;
+  l.thumbRev = l.rev;
   const k = Math.min(size / v.width, size / v.height);
   x.imageSmoothingQuality = 'high';
   x.drawImage(v, (size - v.width * k) / 2, (size - v.height * k) / 2, v.width * k, v.height * k);
@@ -276,7 +303,7 @@ function restore(doc, s) {
   doc.layers = s.layers.slice();
   doc.active = s.active.slice();
   for (const [l, p] of s.props) {
-    if (JSON.stringify(l.adjust) !== JSON.stringify(p.adjust)) l.dirty = true;
+    if (JSON.stringify(l.adjust) !== JSON.stringify(p.adjust)) touch(l);
     Object.assign(l, p, { adjust: p.adjust && { ...p.adjust } });
   }
 }
@@ -298,7 +325,7 @@ export function structEdit(doc, name, fn) {
 
 // Изменение пикселей слоя в прямоугольнике. data — пиксели «до».
 export function pushPixels(doc, layer, name, x, y, data) {
-  layer.dirty = true;
+  touch(layer);
   push(doc, {
     name,
     swap() {
@@ -306,7 +333,7 @@ export function pushPixels(doc, layer, name, x, y, data) {
       const now = ctx.getImageData(x, y, data.width, data.height);
       ctx.putImageData(data, x, y);
       data = now;
-      layer.dirty = true;
+      touch(layer);
     },
   });
 }

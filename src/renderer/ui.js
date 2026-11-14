@@ -80,7 +80,7 @@ export function menubar(root, menus, commands) {
 }
 
 // Сочетание клавиш из события в том же виде, в каком оно записано у команд.
-const CODES = { Equal: '=', Minus: '-', BracketLeft: '[', BracketRight: ']', Backspace: 'Backspace', Delete: 'Del', Enter: 'Enter', Escape: 'Esc' };
+const CODES = { Semicolon: ';', Equal: '=', Minus: '-', BracketLeft: '[', BracketRight: ']', Backspace: 'Backspace', Delete: 'Del', Enter: 'Enter', Escape: 'Esc' };
 export function combo(e) {
   let key = CODES[e.code];
   if (!key && e.code.startsWith('Key')) key = e.code.slice(3);

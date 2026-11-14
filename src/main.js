@@ -111,6 +111,7 @@ async function saveSettings(patch) {
 }
 
 ipcMain.handle('settings-get', loadSettings);
+ipcMain.handle('settings-set', (_e, patch) => saveSettings(patch));
 
 ipcMain.handle('choose-save-root', async () => {
   const res = await dialog.showOpenDialog(win, {

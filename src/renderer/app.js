@@ -73,7 +73,7 @@ const layer = () => (S.cur ? D.activeLayer(S.cur) : null);
 function paintLayer() {
   const l = layer();
   if (!l) { ui.toast('Выберите слой в панели «Слои»'); return null; }
-  if (!l.visible) { ui.toast('Слой скрыт. Включите его, чтобы править'); return null; }
+  if (!D.shown(S.cur, l)) { ui.toast('Слой скрыт. Включите его, чтобы править'); return null; }
   return l;
 }
 
@@ -176,7 +176,7 @@ function drawScene() {
   ctx.imageSmoothingQuality = moving ? 'low' : 'high';
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, d.w, d.h); ctx.clip();
-  D.composite(ctx, d, { draftId: S.draftId, zoom: v.scale * dpr });
+  D.composite(ctx, d, { draftId: S.draftId, zoom: v.scale * dpr, solo: true });
   ctx.restore();
   if (S.wheeling) {
     clearTimeout(settle);
@@ -221,7 +221,7 @@ function drawOverlay() {
   }
 
   if (S.tool === 'move') {
-    const act = D.activeLayers(d).filter((l) => !l.locked && l.visible);
+    const act = D.activeLayers(d).filter((l) => !l.locked && D.shown(d, l));
     for (const l of act) {
       const c = D.corners(l);
       octx.beginPath();
@@ -366,24 +366,35 @@ function bakeMask(node, c) {
   lx.putImageData(img, 0, 0);
 }
 
-function psdToDoc(name, bytes) {
+// lock — закреплять ли слои. Шаблоны студии закрепляются, чтобы оформление
+// не сдвинули случайно. Свои сохранённые работы открываются как были.
+function psdToDoc(name, bytes, lock) {
   const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   const psd = window.agPsd.readPsd(buf, { skipThumbnail: true });
+  // наши пометки: какие слои были глазами и снимками (см. savePsd)
+  let meta = null;
+  try {
+    const m = /<eyephoto>([\s\S]*?)<\/eyephoto>/.exec((psd.imageResources && psd.imageResources.xmpMetadata) || '');
+    if (m) meta = JSON.parse(decodeURIComponent(m[1]));
+  } catch { meta = null; }
+  let index = 0;
   const res = psd.imageResources && psd.imageResources.resolutionInfo;
   const doc = D.makeDoc({ name, w: psd.width, h: psd.height, dpi: Math.round((res && res.horizontalResolution) || 300), background: false });
   let skipped = 0;
   doc.slots = [];
-  doc.template = true;
+  doc.template = !!lock;
+  if (meta) { doc.eyeSeq = meta.eyeSeq || 0; doc.eyes = meta.eyes || 0; }
   const walk = (nodes, hidden, opacity) => {
     for (const n of nodes || []) {
       const hid = hidden || !!n.hidden, op = opacity * (n.opacity == null ? 1 : n.opacity);
       if (n.children) { walk(n.children, hid, op); continue; }
+      const mine = meta && meta.layers[index++];
       if (!n.canvas || !n.canvas.width || !n.canvas.height) { skipped++; continue; }
       const c = im.cloneCanvas(n.canvas);
       bakeMask(n, c);
       // Скрытые небольшие слои в шаблонах студии это образцы: они показывают,
       // куда и какого размера ставить глаз.
-      if (hid && c.width < psd.width * 0.6 && c.height < psd.height * 0.6) {
+      if (lock && hid && c.width < psd.width * 0.6 && c.height < psd.height * 0.6) {
         doc.slots.push({ cx: (n.left || 0) + c.width / 2, cy: (n.top || 0) + c.height / 2, d: Math.max(c.width, c.height) });
       }
       const blend = (n.blendMode || 'normal').replace(/ /g, '-');
@@ -393,7 +404,8 @@ function psdToDoc(name, bytes) {
         cx: (n.left || 0) + c.width / 2, cy: (n.top || 0) + c.height / 2,
         visible: !hid, opacity: op, clip: !!n.clipping,
         blend: BLENDS.includes(blend) ? blend : 'source-over',
-        locked: true, // оформление шаблона закреплено, чтобы его не сдвинули случайно; замок снимается щелчком
+        locked: lock ? true : !!(mine && mine.locked), // замок снимается щелчком
+        kind: (mine && mine.kind) || 'pixel', eye: (mine && mine.eye) || 0, eyeKey: (mine && mine.eyeKey) || '',
       }));
     }
   };
@@ -424,21 +436,43 @@ function sheetDoc(key) {
 function placeCanvas(doc, c, name, adjust, pupil) {
   const k = Math.min(doc.w / c.width, doc.h / c.height, 1);
   const found = !!(pupil && pupil.found);
+  const eye = doc.eyeSeq = (doc.eyeSeq || 0) + 1;
   D.structEdit(doc, 'Поместить снимок', () => {
     const l = D.makeLayer({
       name: name.replace(/\.[^.]+$/, ''), canvas: c, scale: k, kind: 'photo', adjust,
+      eye, eyeKey: eyeKeyFor(doc, name),
       cx: doc.w / 2 - (found ? (pupil.x - c.width / 2) * k : 0),
       cy: doc.h / 2 - (found ? (pupil.y - c.height / 2) * k : 0),
     });
     doc.layers.push(l);
     doc.active = [l.id];
+    doc.sel = null;
+    if (found) {
+      const m = Math.min(c.width, c.height);
+      const r = Math.min(m * 0.46, Math.max(m * 0.15, pupil.r * 3.3)) * k;
+      doc.sel = { shapes: [{ type: 'ellipse', cx: doc.w / 2, cy: doc.h / 2, rx: r, ry: r }], feather: S.opts.marquee.feather };
+    }
   });
-  doc.sel = null;
-  if (found) {
-    const m = Math.min(c.width, c.height);
-    const r = Math.min(m * 0.46, Math.max(m * 0.15, pupil.r * 3.3)) * k;
-    doc.sel = { shapes: [{ type: 'ellipse', cx: doc.w / 2, cy: doc.h / 2, rx: r, ry: r }], feather: S.opts.marquee.feather };
+  doc.solo = eye; // новый снимок показываем один, остальные глаза не мешают
+}
+
+// Подпись глаза: последние 4 цифры имени файла (DSC04069 -> 4069), как в панели студии.
+// Если такая уже есть, берём на цифру больше.
+function eyeKeyFor(doc, name) {
+  const taken = new Set(doc.layers.map((l) => l.eyeKey).filter(Boolean));
+  const digits = (name.replace(/\.[^.]+$/, '').match(/\d/g) || []).join('');
+  if (!digits) {
+    const base = name.replace(/\.[^.]+$/, '').slice(0, 8) || 'глаз';
+    let k = base, n = 2;
+    while (taken.has(k)) k = `${base} ${n++}`;
+    return k;
   }
+  for (let len = Math.min(4, digits.length); len <= digits.length; len++) {
+    if (!taken.has(digits.slice(-len))) return digits.slice(-len);
+  }
+  let k = digits, n = 2;
+  while (taken.has(k)) k = `${digits}-${n++}`;
+  return k;
 }
 
 // file: { name, kind: raw | image | psd, data }. how: 'place' — слоем в текущий документ,
@@ -448,7 +482,7 @@ async function openData(file, how) {
   await setBusy(file.kind === 'raw' ? 'Проявляю снимок с камеры' : file.kind === 'psd' ? 'Открываю шаблон' : 'Открываю снимок');
   try {
     if (file.kind === 'psd') {
-      const { doc, skipped } = psdToDoc(file.name.replace(PSD_RE, ''), file.data);
+      const { doc, skipped } = psdToDoc(file.name.replace(PSD_RE, ''), file.data, how === 'template');
       addDoc(doc);
       if (skipped) ui.toast(`Не перенесено слоёв: ${skipped}. Корректирующие слои и эффекты пока не поддерживаются`);
     } else {
@@ -508,7 +542,7 @@ async function showHome(on) {
     card.append(ui.el('div', 'card-art', ui.icon('sheet')), ui.el('div', 'card-name'), ui.el('div', 'card-note', 'PSD'));
     card.children[1].textContent = item.name;
     card.title = item.name;
-    card.onclick = async () => openData(await api.readTemplate(item.file), 'open');
+    card.onclick = async () => openData(await api.readTemplate(item.file), 'template');
     box.appendChild(card);
     templateThumb(item, card.firstChild);
   }
@@ -597,7 +631,10 @@ async function neuralRemove(l, paint, box) {
   const before = l.canvas.getContext('2d').getImageData(region.x, region.y, region.w, region.h);
   await setBusy('Убираю лишнее');
   try {
-    await im.inpaintPatch(l.canvas, mask, region, (rgba, m) => api.inpaint({ rgba, mask: m }));
+    // под вырезанным глазом лежит его исходный снимок: по нему модель видит, что за краем круга
+    const photo = l.src && D.layerById(d, l.src.id);
+    const under = photo && ((x, N) => x.drawImage(photo.canvas, region.x + l.src.x, region.y + l.src.y, region.w, region.h, 0, 0, N, N));
+    await im.inpaintPatch(l.canvas, mask, region, (rgba, m) => api.inpaint({ rgba, mask: m }), under);
     D.pushPixels(d, l, 'Убрать нейронкой', region.x, region.y, before);
   } catch (e) {
     console.error(e);
@@ -617,7 +654,14 @@ function removeSelection() {
     const m = D.selMask(sel, _mx.canvas.width, _mx.canvas.height, setT, { grow: pad });
     _mx.setTransform(1, 0, 0, 1, 0, 0);
     _mx.drawImage(m, 0, 0);
-  }, D.selBounds(sel)).then(() => { d.sel = null; refresh(); });
+  }, D.selBounds(sel)).then(() => {
+    if (d.sel !== sel) return;
+    const n = d.undo.length;
+    D.structEdit(d, 'Снять выделение', () => { d.sel = null; });
+    // правка пикселей и снятие выделения отменяются одним шагом
+    if (n && d.undo[n - 1].name === 'Убрать нейронкой') D.mergeLast(d, 2, 'Убрать нейронкой');
+    refresh(); requestDraw();
+  });
 }
 
 function removeStroke(l, g) {
@@ -651,11 +695,13 @@ function newLayer() {
 function copyToLayer() {
   const d = S.cur, l = layer();
   if (!l) { ui.toast('Выберите слой в панели «Слои»'); return; }
-  let c, cx = l.cx, cy = l.cy;
+  let c, cx = l.cx, cy = l.cy, cutAt = { x: 0, y: 0 };
+  const hadSel = !!d.sel;
   if (d.sel) {
     const f = d.sel.feather / l.scale;
     const r = D.localRect(l, D.selBounds(d.sel), f * 2 + 2);
     if (r.w < 2 || r.h < 2) { ui.toast('Выделение не попадает на выбранный слой'); return; }
+    cutAt = { x: r.x, y: r.y };
     c = im.makeCanvas(r.w, r.h);
     const x = c.getContext('2d');
     x.drawImage(l.canvas, -r.x, -r.y);
@@ -670,18 +716,21 @@ function copyToLayer() {
   // Круг, вырезанный из снимка, это и есть глаз: с ним дальше работают раскладки.
   const isEye = !!d.sel && l.kind === 'photo';
   let made;
-  D.structEdit(d, d.sel ? 'Вырезать на новый слой' : 'Дублировать слой', () => {
+  D.structEdit(d, hadSel ? 'Вырезать на новый слой' : 'Дублировать слой', () => {
     made = D.makeLayer({
       name: isEye ? `Глаз ${d.eyes = (d.eyes || 0) + 1}` : d.sel ? D.nextName(d) : l.name + ' копия',
       kind: isEye ? 'eye' : d.sel ? 'pixel' : l.kind,
       canvas: c, cx, cy, scale: l.scale, rot: l.rot,
       adjust: l.adjust && { ...l.adjust }, opacity: l.opacity,
+      eye: l.eye, eyeKey: l.eyeKey,
+      // где этот кусок лежит в исходном снимке: нейронке это нужно как подложка у края глаза
+      src: isEye ? { id: l.id, x: cutAt.x, y: cutAt.y } : l.src,
     });
     d.layers.splice(d.layers.indexOf(l) + 1, 0, made);
     d.active = [made.id];
     if (isEye) { l.visible = false; l.cache = null; l.dirty = true; } // исходник на листе больше не нужен, память под его копию тоже
+    d.sel = null;
   });
-  d.sel = null;
   S.pupil = null;
   if (isEye) {
     // дальше по делу идёт ретушь: показываем глаз крупно и даём лассо
@@ -729,6 +778,71 @@ function clearSelection() {
   refresh(); requestDraw();
 }
 
+// Ctrl+E: выбранный слой сливается с тем, что под ним. Если выбрано несколько,
+// сливаются они все, снизу вверх.
+function mergeDown() {
+  const d = S.cur;
+  let act = D.activeLayers(d);
+  if (!act.length) return;
+  if (act.length === 1) {
+    const i = d.layers.indexOf(act[0]);
+    if (i <= 0) { ui.toast('Под этим слоем нет слоя, с которым его объединить'); return; }
+    act = [d.layers[i - 1], act[0]];
+  }
+  if (act.some((l) => l.locked)) { ui.toast('Один из слоёв закреплён. Снимите замок щелчком по нему в панели «Слои»'); return; }
+  let res = act[0];
+  for (const up of act.slice(1)) res = D.merged(res, up);
+  D.structEdit(d, 'Объединить слои', () => {
+    const at = d.layers.indexOf(act[0]);
+    d.layers = d.layers.filter((l) => !act.includes(l));
+    d.layers.splice(Math.min(at, d.layers.length), 0, res);
+    d.active = [res.id];
+  });
+  S.pupil = null;
+  refresh(); requestDraw();
+}
+
+// Сохранение работы со слоями в PSD: файл открывается и в фотошопе, и здесь.
+// Каждый слой записывается в пикселях листа, то есть проявка, размер и поворот
+// запекаются, как это сделал бы сам фотошоп.
+function buildPsd(d) {
+    const children = d.layers.map((l) => {
+      const r = D.rasterize(l);
+      return {
+        name: l.name, left: r.left, top: r.top, canvas: r.canvas, hidden: !l.visible, opacity: l.opacity,
+        blendMode: l.blend === 'source-over' ? 'normal' : l.blend.replace(/-/g, ' '), clipping: !!l.clip,
+      };
+    });
+    const meta = {
+      eyeSeq: d.eyeSeq || 0, eyes: d.eyes || 0,
+      layers: d.layers.map((l) => ({ kind: l.kind, eye: l.eye, eyeKey: l.eyeKey, locked: l.locked })),
+    };
+    const res = { horizontalResolution: d.dpi, horizontalResolutionUnit: 'PPI', widthUnit: 'Inches', verticalResolution: d.dpi, verticalResolutionUnit: 'PPI', heightUnit: 'Inches' };
+    return new Uint8Array(window.agPsd.writePsd({
+      width: d.w, height: d.h, children, canvas: D.flatten(d),
+      imageResources: { resolutionInfo: res, xmpMetadata: `<eyephoto>${encodeURIComponent(JSON.stringify(meta))}</eyephoto>` },
+    }, { generateThumbnail: true }));
+}
+window.__psd = (file) => api.writePath({ file, data: buildPsd(S.cur) });
+
+async function savePsd() {
+  const d = S.cur;
+  if (!d || S.busy) return;
+  await setBusy('Собираю PSD');
+  let data;
+  try {
+    data = buildPsd(d);
+  } catch (e) {
+    console.error(e);
+    setBusy('');
+    await ui.tell('Не получилось собрать PSD', 'Скорее всего, не хватило памяти: документ слишком большой.');
+    return;
+  }
+  setBusy('');
+  const file = await api.saveAs({ name: d.name.replace(/[\\/:*?"<>|]/g, ' ') + '.psd', label: 'Photoshop', ext: 'psd', data });
+  if (file) { d.changed = false; refreshTabs(); ui.toast('Сохранено: ' + file); }
+}
+
 function moveOrder(dir) {
   const d = S.cur, l = layer();
   if (!l || l.locked) return;
@@ -746,12 +860,13 @@ function toggleClip() {
 }
 
 const movable = (d) => d.layers.filter((l) => l.visible && !l.locked);
+const liveActive = (d) => D.activeLayers(d).filter((l) => !l.locked && D.shown(d, l));
 const eyesOf = (d) => movable(d).filter((l) => l.kind === 'eye');
 
 // Пара для раскладки: два выделенных слоя, а если выделено не два,
 // то два глаза, которые есть на листе.
 function pairTargets(quiet) {
-  const d = S.cur, act = D.activeLayers(d).filter((l) => !l.locked && l.visible);
+  const d = S.cur, act = liveActive(d);
   if (act.length === 2) return act;
   const eyes = eyesOf(d);
   if (eyes.length === 2) return eyes;
@@ -764,7 +879,7 @@ function pairTargets(quiet) {
 
 function singleTarget(quiet) {
   const d = S.cur, l = layer();
-  if (l && !l.locked && l.visible) return l;
+  if (l && !l.locked && D.shown(d, l)) return l;
   const eyes = eyesOf(d);
   if (eyes.length === 1) return eyes[0];
   if (!quiet) ui.toast('Выберите слой с глазом в панели «Слои»');
@@ -774,6 +889,7 @@ function singleTarget(quiet) {
 function layoutPair(type) {
   const d = S.cur, pair = pairTargets();
   if (!pair) return;
+  d.solo = 0;
   // кто левее на листе, тот и левый; если стоят одинаково, левый тот, что ниже в слоях
   const [left, right] = pair.slice().sort((a, b) => (Math.abs(a.cx - b.cx) > 1 ? a.cx - b.cx : d.layers.indexOf(a) - d.layers.indexOf(b)));
   const slots = im.pairSlots(d.w, d.h, type);
@@ -790,6 +906,7 @@ function layoutPair(type) {
 function layoutSwap() {
   const d = S.cur, pair = pairTargets();
   if (!pair) return;
+  d.solo = 0;
   const [a, b] = pair, size = (l) => Math.max(l.canvas.width, l.canvas.height);
   D.structEdit(d, 'Поменять глаза местами', () => {
     const pa = { cx: a.cx, cy: a.cy, d: size(a) * a.scale }, pb = { cx: b.cx, cy: b.cy, d: size(b) * b.scale };
@@ -802,6 +919,7 @@ function layoutSwap() {
 function layoutSingle() {
   const d = S.cur, l = singleTarget();
   if (!l) return;
+  d.solo = 0;
   D.structEdit(d, 'По центру', () => {
     l.scale = im.singleIris(d.w, d.h) / Math.max(l.canvas.width, l.canvas.height);
     l.cx = d.w / 2; l.cy = d.h / 2; l.rot = 0;
@@ -815,13 +933,14 @@ function layoutSingle() {
 function layoutSlots() {
   const d = S.cur, eyes = eyesOf(d).filter((l) => !l.slotCopy);
   if (!eyes.length) { ui.toast('Сначала вырежьте глаз: круг по радужке и Ctrl+J'); return; }
+  d.solo = 0;
   D.structEdit(d, 'По местам шаблона', () => {
     d.layers = d.layers.filter((l) => !l.slotCopy);
     d.slots.forEach((slot, i) => {
       let l = eyes[i];
       if (!l) {
         const src = eyes[i % eyes.length];
-        l = D.makeLayer({ name: src.name + ' копия', kind: 'eye', slotCopy: true, canvas: src.canvas, adjust: src.adjust && { ...src.adjust } });
+        l = D.makeLayer({ name: src.name + ' копия', kind: 'eye', slotCopy: true, canvas: src.canvas, adjust: src.adjust && { ...src.adjust }, eye: src.eye, eyeKey: src.eyeKey, src: src.src });
         d.layers.push(l);
       }
       l.scale = slot.d / Math.max(l.canvas.width, l.canvas.height);
@@ -866,12 +985,33 @@ async function sheetJpeg(d) {
   return im.setJpegDpi(await blob.arrayBuffer(), d.dpi);
 }
 
+// Цифра точки, с которой начинаются имена файлов (у каждой студии своя).
+// Спрашивается один раз и запоминается на этом компьютере.
+async function askPrefix(current) {
+  const v = await ui.ask({
+    title: 'Номер точки',
+    text: 'С этой цифры начинаются имена готовых файлов, например 4-1233. Спрашиваю один раз, поменять можно в меню «Файл».',
+    ok: 'Запомнить',
+    input: {
+      value: current || '', maxLength: 3, placeholder: '4', note: 'цифра вашей точки',
+      filter: (x) => x.replace(/\D/g, '').slice(0, 3),
+      validate: (x) => (/^\d{1,3}$/.test(x) ? '' : 'Введите цифру точки, например 4'),
+    },
+  });
+  if (v) await api.setSettings({ pointPrefix: v });
+  return v;
+}
+
 async function saveNumbered() {
   const d = S.cur;
   if (!d || S.busy) return;
-  let { savePath } = await api.settings();
+  let { savePath, pointPrefix } = await api.settings();
+  if (!pointPrefix) {
+    pointPrefix = await askPrefix('');
+    if (!pointPrefix) return;
+  }
   if (!savePath) {
-    await ui.tell('Куда сохранять готовые фото', 'Сейчас выберите папку. Внутри неё сами создадутся папки месяца и дня.');
+    await ui.tell('Куда сохранять готовые фото', 'Сейчас выберите общую папку готовых фото. Папку месяца и дня программа будет находить в ней сама.');
     savePath = await api.chooseSaveRoot();
     if (!savePath) return;
   }
@@ -880,19 +1020,33 @@ async function saveNumbered() {
     text: savePath,
     ok: 'Сохранить',
     input: {
-      prefix: '4-', maxLength: 4, placeholder: '0000', note: 'номер фото, 4 цифры',
+      prefix: pointPrefix + '-', maxLength: 4, placeholder: '0000', note: 'номер фото, 4 цифры',
       filter: (v) => v.replace(/\D/g, '').slice(0, 4),
       validate: (v) => (/^\d{4}$/.test(v) ? '' : 'Нужно ровно 4 цифры, например 1233'),
     },
   });
   if (!number) return;
+  // сохраняется то же, что на экране: все глаза, а не только выбранный
+  if (d.solo) { d.solo = 0; fit(); refresh(); }
   await setBusy('Сохраняю');
   const data = await sheetJpeg(d);
-  let res = await api.saveJpeg({ number, data, overwrite: false });
+  const req = { prefix: pointPrefix, number, data, overwrite: false, create: false };
+  let res = await api.saveJpeg(req);
   setBusy('');
+  if (res.status === 'no-folder') {
+    const go = await ui.ask({
+      title: 'Папки на сегодня ещё нет',
+      text: `Не нашёл в «${savePath}» папку за сегодняшнее число. Создать ${res.expected}?`,
+      ok: 'Создать и сохранить',
+    });
+    if (!go) return;
+    req.create = true;
+    res = await api.saveJpeg(req);
+  }
   if (res.status === 'exists') {
-    if (!(await ui.ask({ title: `Файл 4-${number}.jpg уже есть`, text: 'Заменить его новым?', ok: 'Заменить' }))) return;
-    res = await api.saveJpeg({ number, data, overwrite: true });
+    if (!(await ui.ask({ title: `Файл ${pointPrefix}-${number}.jpg уже есть`, text: 'Заменить его новым?', ok: 'Заменить' }))) return;
+    req.overwrite = true;
+    res = await api.saveJpeg(req);
   }
   if (res.status === 'ok') {
     d.changed = false;
@@ -927,7 +1081,7 @@ const TOOLS = [
   ['brush', 'Кисть', 'B', 'Рисует выбранным цветом на активном слое'],
   ['eraser', 'Ластик', 'E', 'Стирает пиксели активного слоя до прозрачности'],
   ['burn', 'Затемнитель', 'O', 'Каждый проход делает темнее. С Alt осветляет'],
-  ['pupil', 'Зрачок', 'P', 'Поставьте круг по краю зрачка: мышкой или ползунком справа. Потом «Сузить зрачок» или Enter'],
+  ['pupil', 'Зрачок', 'P', 'Подведите круг к краю зрачка ползунком справа или мышкой за край. Потом «Сузить зрачок» или Enter'],
   '-',
   ['hand', 'Рука', 'H', 'Двигает картинку. То же самое делает пробел с любым инструментом'],
   ['zoom', 'Масштаб', 'Z', 'Щелчок приближает, Alt+щелчок отдаляет. Колесо работает всегда'],
@@ -940,15 +1094,26 @@ for (const t of TOOLS) {
   b.dataset.tool = t[0];
   b.title = `${t[1]} (${t[2]})`;
   b.onclick = () => setTool(t[0]);
+  if (t[0] === 'hand') b.ondblclick = () => fit();
+  if (t[0] === 'zoom') b.ondblclick = () => zoomAt(...center(), 1, 1);
   $('tools').appendChild(b);
 }
 
+// Круг ставится по центру глаза, как в панели студии для фотошопа. Если зрачок
+// нашёлся и лежит рядом с центром, круг встаёт точно на него. Размер берётся
+// по найденному зрачку, а если не нашёлся, то с запасом, в 1,6 раза шире итогового.
 function initPupil() {
   const l = layer();
-  if (!l || !l.visible) { S.pupil = null; return; }
+  if (!l || !D.shown(S.cur, l)) { S.pupil = null; return; }
   if (S.pupil && S.pupil.layerId === l.id) return;
+  const w = l.canvas.width, h = l.canvas.height, R = Math.min(w, h) / 2;
   const g = im.findPupil(l.canvas);
-  S.pupil = { layerId: l.id, x: g.x, y: g.y, r: g.r };
+  const near = g.found && Math.hypot(g.x - w / 2, g.y - h / 2) < R * 0.2;
+  S.pupil = {
+    layerId: l.id,
+    x: near ? g.x : w / 2, y: near ? g.y : h / 2,
+    r: near ? g.r : R * im.PUPIL_RATIO * 1.6,
+  };
 }
 
 // Тот же круг в координатах листа, чтобы рисовать его и ловить мышкой.
@@ -960,37 +1125,41 @@ function pupilOnDoc() {
 }
 
 function setTool(id) {
+  if (id === 'pupil' && S.tool !== 'pupil') S.prevTool = S.tool;
   S.tool = id;
   S.drag = null;
   if (id === 'pupil') { initPupil(); syncPupilPanel(); }
   refreshOptions();
   refreshStatus();
-  canvas.style.cursor = id === 'hand' ? 'grab' : id === 'zoom' ? 'zoom-in' : id === 'move' || id === 'pupil' ? 'default' : 'crosshair';
+  setCursor();
   requestDraw();
 }
 
 function applyPupil() {
   const d = S.cur, l = paintLayer();
-  if (!l || !S.pupil || S.busy) return;
-  if (S.pupil.layerId !== l.id) { S.pupil = null; initPupil(); }
+  if (!l || S.busy) return;
+  if (!S.pupil || S.pupil.layerId !== l.id) { S.pupil = null; initPupil(); }
+  if (!S.pupil) return;
   const lp = { x: S.pupil.x, y: S.pupil.y, r: S.pupil.r };
-  const R = Math.min(l.canvas.width, l.canvas.height) / 2, ratio = S.opts.pupil.ratio / 100;
+  const R = Math.min(l.canvas.width, l.canvas.height) / 2;
   const rect = im.pupilRect(l.canvas, lp, R);
   if (rect.w < 2 || rect.h < 2) return;
   const before = l.canvas.getContext('2d').getImageData(rect.x, rect.y, rect.w, rect.h);
-  im.shrinkPupil(l.canvas, lp, R, ratio);
+  im.shrinkPupil(l.canvas, lp, R, im.PUPIL_RATIO);
   D.pushPixels(d, l, 'Сузить зрачок', rect.x, rect.y, before);
-  S.pupil.r = R * ratio;
+  // дело сделано: круг убираем и возвращаем инструмент, которым работали до этого
+  S.pupil = null;
+  if (S.tool === 'pupil') setTool(S.prevTool && S.prevTool !== 'pupil' ? S.prevTool : 'lasso');
   refresh(); requestDraw();
 }
 
-// Панель «Зрачок» справа, по образцу панели студии для фотошопа:
-// ползунок задаёт, где сейчас край зрачка, кнопка сужает его до стандартного.
+// Панель «Зрачок» справа устроена как панель студии для фотошопа: один ползунок
+// показывает кругом, где сейчас край зрачка, кнопка сужает его до стандартного.
 const pupilUi = {};
 (() => {
   const box = $('pupilBody');
   pupilUi.now = ui.slider({
-    label: 'Зрачок сейчас', min: 8, max: 80, step: 0.5, unit: '%', value: 30,
+    label: 'Край зрачка', min: 8, max: 80, step: 0.5, unit: '%', value: 38,
     onInput: (v) => {
       const l = layer();
       if (!l) return;
@@ -1000,14 +1169,13 @@ const pupilUi = {};
       requestOverlay();
     },
   });
-  pupilUi.to = ui.slider({
-    label: 'Сделать', min: 12, max: 40, step: 0.5, unit: '%', value: S.opts.pupil.ratio, reset: 23.5,
-    onInput: (v) => { S.opts.pupil.ratio = v; },
-  });
   pupilUi.go = ui.el('button', 'btn primary wide', 'Сузить зрачок');
-  pupilUi.go.onclick = () => { if (S.tool !== 'pupil') setTool('pupil'); applyPupil(); };
+  pupilUi.go.onclick = () => {
+    if (S.tool !== 'pupil') { setTool('pupil'); ui.toast('Подведите круг к краю зрачка и нажмите ещё раз'); return; }
+    applyPupil();
+  };
   pupilUi.note = ui.el('p', 'panel-note', '');
-  box.append(pupilUi.now, pupilUi.to, pupilUi.go, pupilUi.note);
+  box.append(pupilUi.now, pupilUi.go, pupilUi.note);
 })();
 
 function syncPupilPanel() {
@@ -1018,12 +1186,11 @@ function syncPupilPanel() {
 }
 
 function refreshPupilPanel() {
-  const l = layer(), ok = !!(l && l.visible && l.kind !== 'photo');
+  const l = layer(), ok = !!(l && D.shown(S.cur, l) && l.kind !== 'photo');
   pupilUi.go.disabled = !ok;
   pupilUi.now.classList.toggle('off', !ok);
-  pupilUi.to.classList.toggle('off', !ok);
-  pupilUi.note.textContent = ok ? 'Размер считается от ширины радужки. Круг на картинке двигается мышкой.'
-    : l && l.kind === 'photo' ? 'Сначала вырежьте глаз: круг по радужке и Ctrl+J.' : 'Выберите слой с глазом.';
+  pupilUi.note.textContent = ok ? '' : l && l.kind === 'photo' ? 'Сначала вырежьте глаз: круг по радужке и Ctrl+J.' : 'Выберите слой с глазом.';
+  pupilUi.note.hidden = ok;
   syncPupilPanel();
 }
 
@@ -1112,6 +1279,37 @@ function endStroke(g) {
   refresh();
 }
 
+// Курсоры по образцу фотошопа. Для кистей системный курсор прячется: вместо него
+// рисуется круг размером с кисть.
+const svgCursor = (body, x, y, fallback) =>
+  `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'>${body}</svg>`)}") ${x} ${y}, ${fallback}`;
+const two = (d, extra = '') => `<path d='${d}' stroke='#fff' stroke-width='3' ${extra}/><path d='${d}' stroke='#000' stroke-width='1.2' ${extra}/>`;
+const CURSORS = {
+  move: svgCursor(`<path d='M4 3l9 5.2-3.7 1 2.1 4.3-1.7.8-2.1-4.3L5 12.600z' fill='#000' stroke='#fff' stroke-width='1'/>${two('M17 13v8M13 17h8M17 13l-1.300 1.500M17 13l1.300 1.500M17 21l-1.300-1.500M17 21l1.300-1.500M13 17l1.500-1.300M13 17l1.500 1.300M21 17l-1.500-1.300M21 17l-1.500 1.300')}`, 4, 3, 'default'),
+  marquee: svgCursor(two('M12 4v6M12 14v6M4 12h6M14 12h6'), 12, 12, 'crosshair'),
+  lasso: svgCursor(`${two('M13 5c-4.400 0-8 2-8 4.500S8.600 14 13 14s8-2 8-4.500S17.400 5 13 5z')}${two('M8.500 13.300c-1.400.900-1.500 2.600-.300 3.300 1.100.700 2.500-.100 2.300-1.300M9.600 16.500 7 21')}`, 7, 21, 'crosshair'),
+  pupil: svgCursor(two('M12 5v5M12 14v5M5 12h5M14 12h5'), 12, 12, 'default'),
+  zoomIn: svgCursor(`<circle cx='10' cy='10' r='6' fill='#fff' fill-opacity='.25' stroke='#fff' stroke-width='3'/><circle cx='10' cy='10' r='6' stroke='#000' stroke-width='1.300'/>${two('M14.500 14.500 20 20M7.500 10h5M10 7.500v5')}`, 10, 10, 'zoom-in'),
+  zoomOut: svgCursor(`<circle cx='10' cy='10' r='6' fill='#fff' fill-opacity='.25' stroke='#fff' stroke-width='3'/><circle cx='10' cy='10' r='6' stroke='#000' stroke-width='1.300'/>${two('M14.500 14.500 20 20M7.500 10h5')}`, 10, 10, 'zoom-out'),
+  dot: svgCursor(two('M12 9.500v5M9.500 12h5'), 12, 12, 'crosshair'),
+};
+const SIZED = ['patch', 'stamp', 'brush', 'eraser', 'burn'];
+
+function setCursor(over) {
+  const t = S.tool;
+  let c = over;
+  if (!c) {
+    if (t === 'hand' || S.space) c = S.drag && S.drag.type === 'pan' ? 'grabbing' : 'grab';
+    else if (t === 'zoom') c = S.alt ? CURSORS.zoomOut : CURSORS.zoomIn;
+    else if (SIZED.includes(t)) {
+      // совсем маленькую кисть кругом не разглядеть, показываем перекрестие
+      const tiny = S.cur && S.opts[t].size * S.cur.view.scale < 7;
+      c = t === 'stamp' && S.alt ? CURSORS.marquee : tiny ? CURSORS.dot : 'none';
+    } else c = CURSORS[t] || 'default';
+  }
+  canvas.style.cursor = c;
+}
+
 // Круг двигается за середину и меняет размер за край.
 function circleHit(c, p) {
   const d = Math.hypot(p.x - c.x, p.y - c.y), tol = 7 / S.cur.view.scale;
@@ -1125,7 +1323,7 @@ function soleEllipse() {
 }
 
 function moveHit(p) {
-  const d = S.cur, act = D.activeLayers(d).filter((l) => !l.locked && l.visible);
+  const d = S.cur, act = liveActive(d);
   if (act.length !== 1) return null;
   const l = act[0], k = d.view.scale, cs = D.corners(l);
   let best = -1, dist = Infinity;
@@ -1141,7 +1339,7 @@ canvas.addEventListener('pointerdown', (e) => {
   if (!d || S.busy) return;
   const p = toDocPt(e), o = S.opts[S.tool];
   canvas.setPointerCapture(e.pointerId);
-  if (e.button !== 0 || S.space || S.tool === 'hand') { S.drag = { type: 'pan' }; canvas.style.cursor = 'grabbing'; return; }
+  if (e.button !== 0 || S.space || S.tool === 'hand') { S.drag = { type: 'pan' }; setCursor('grabbing'); return; }
 
   if (S.tool === 'zoom') {
     const r = canvas.getBoundingClientRect();
@@ -1153,12 +1351,12 @@ canvas.addEventListener('pointerdown', (e) => {
       S.drag = { ...h, commit: D.beginStruct(d), start: p, s0: l.scale, r0: l.rot, c0: { x: l.cx, y: l.cy } };
       if (h.type === 'scale') S.drag.anchor = D.corners(l)[(h.corner + 2) % 4];
     } else {
-      const under = d.layers.slice().reverse().find((l) => l.visible && !l.locked && D.hit(l, p));
+      const under = d.layers.slice().reverse().find((l) => D.shown(d, l) && !l.locked && D.hit(l, p));
       if (under && o.auto && !d.active.includes(under.id)) {
         d.active = e.shiftKey || e.ctrlKey ? [...d.active, under.id] : [under.id];
         refresh();
       }
-      const act = D.activeLayers(d).filter((l) => !l.locked && l.visible);
+      const act = liveActive(d);
       const inside = act.some((l) => { const b = D.bounds(l); return p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h; });
       if (act.length && (under || inside)) {
         S.drag = { type: 'move', commit: D.beginStruct(d), start: p, layers: act.map((l) => ({ l, x: l.cx, y: l.cy })), moved: false };
@@ -1166,14 +1364,14 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   } else if (S.tool === 'marquee') {
     const one = soleEllipse(), h = one && !e.shiftKey ? circleHit({ x: one.cx, y: one.cy, r: Math.max(one.rx, one.ry) }, p) : '';
-    if (h === 'edge') S.drag = { type: 'selresize', s: one, k: one.ry / one.rx };
-    else if (h === 'in') S.drag = { type: 'selmove', s: one, dx: p.x - one.cx, dy: p.y - one.cy };
+    if (h === 'edge') S.drag = { type: 'selresize', commit: D.beginStruct(d), s: one, k: one.ry / one.rx };
+    else if (h === 'in') S.drag = { type: 'selmove', commit: D.beginStruct(d), s: one, dx: p.x - one.cx, dy: p.y - one.cy };
     else {
       const start = o.center ? snapToCenter(p) : p;
-      S.drag = { type: 'marquee', start, add: e.shiftKey, shape: { type: 'ellipse', cx: start.x, cy: start.y, rx: 0, ry: 0 } };
+      S.drag = { type: 'marquee', commit: D.beginStruct(d), start, add: e.shiftKey, shape: { type: 'ellipse', cx: start.x, cy: start.y, rx: 0, ry: 0 } };
     }
   } else if (S.tool === 'lasso') {
-    S.drag = { type: 'lasso', add: e.shiftKey, shape: { type: 'poly', pts: [p], sub: e.altKey } };
+    S.drag = { type: 'lasso', commit: D.beginStruct(d), add: e.shiftKey, shape: { type: 'poly', pts: [p], sub: e.altKey } };
   } else if (S.tool === 'pupil') {
     initPupil();
     const c = pupilOnDoc(), h = c ? circleHit(c, p) : '';
@@ -1200,11 +1398,11 @@ canvas.addEventListener('pointermove', (e) => {
   if (!g) {
     if (S.tool === 'move') {
       const h = moveHit(p);
-      canvas.style.cursor = !h ? 'default' : h.type === 'scale' ? 'nwse-resize' : 'alias';
+      setCursor(!h ? '' : h.type === 'scale' ? 'nwse-resize' : 'alias');
     } else if (S.tool === 'marquee' || S.tool === 'pupil') {
       const one = S.tool === 'pupil' ? pupilOnDoc() : soleEllipse();
       const h = one ? circleHit(S.tool === 'pupil' ? one : { x: one.cx, y: one.cy, r: Math.max(one.rx, one.ry) }, p) : '';
-      canvas.style.cursor = h === 'edge' ? 'nwse-resize' : h === 'in' ? 'move' : S.tool === 'pupil' ? 'default' : 'crosshair';
+      setCursor(h === 'edge' ? 'nwse-resize' : h === 'in' ? 'move' : '');
     }
     if (S.opts[S.tool] && S.opts[S.tool].size) requestOverlay();
     return;
@@ -1271,7 +1469,7 @@ function endDrag(e) {
   S.drag = null;
   if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
   if (!g || !d) return;
-  if (g.type === 'pan') canvas.style.cursor = S.tool === 'hand' ? 'grab' : S.tool === 'move' ? 'default' : 'crosshair';
+  if (g.type === 'pan') setCursor();
   if (g.type === 'move' || g.type === 'scale' || g.type === 'rotate') {
     if (g.moved) g.commit(g.type === 'move' ? 'Перемещение' : g.type === 'scale' ? 'Размер слоя' : 'Поворот слоя');
     refresh();
@@ -1279,10 +1477,17 @@ function endDrag(e) {
   if (g.type === 'marquee' || g.type === 'lasso') {
     const s = g.shape;
     const ok = s.type === 'ellipse' ? s.rx > 2 && s.ry > 2 : s.pts.length > 2;
+    const had = !!d.sel;
     if (!ok) { if (!g.add && !s.sub) d.sel = null; }
     else if ((g.add || s.sub) && d.sel) d.sel.shapes.push(s);
     else if (!s.sub) d.sel = { shapes: [s], feather: S.opts[S.tool].feather };
+    if (ok) g.commit(g.type === 'marquee' ? 'Овальная область' : 'Лассо');
+    else if (had && !d.sel) g.commit('Снять выделение');
     refresh();
+  }
+  if (g.type === 'selmove' || g.type === 'selresize') {
+    g.commit(g.type === 'selmove' ? 'Перемещение выделения' : 'Размер выделения');
+    refreshHistory(); refreshTabs();
   }
   if (g.type === 'patch') removeStroke(D.activeLayer(d), g);
   if (g.type === 'stroke') endStroke(g);
@@ -1501,6 +1706,51 @@ async function developLayer() {
   refresh(); requestDraw();
 }
 
+// Полоска «Глаза» над слоями, по образцу панели студии Iris Layers: щелчок по глазу
+// показывает только его и выбирает его слой, «Оба» возвращает все глаза разом.
+// Сами слои при этом не скрываются, в истории ничего лишнего не появляется.
+function showEye(g) {
+  const d = S.cur;
+  d.solo = g.id;
+  d.active = [g.layer.id];
+  S.pupil = null;
+  if (g.cut) zoomToLayer(g.layer); else fit();
+  if (S.tool === 'pupil') initPupil();
+  refresh(); requestDraw();
+}
+
+function showAllEyes() {
+  const d = S.cur;
+  d.solo = 0;
+  const eyes = eyesOf(d);
+  if (eyes.length) d.active = eyes.map((l) => l.id);
+  S.pupil = null;
+  fit(); refresh();
+}
+
+function refreshEyes() {
+  const d = S.cur, box = $('eyes');
+  box.textContent = '';
+  const groups = d ? D.eyeGroups(d) : [];
+  $('eyesPanel').hidden = !groups.length;
+  if (!groups.length) return;
+  for (const g of groups) {
+    const b = ui.el('button', 'eye-chip' + (d.solo === g.id ? ' on' : ''));
+    b.title = g.cut ? 'Показать только этот глаз' : 'Снимок ещё не вырезан: круг по радужке и Ctrl+J';
+    const label = ui.el('span');
+    label.textContent = g.key;
+    b.append(im.cloneCanvas(D.thumb(g.layer, 60)), label);
+    b.onclick = () => showEye(g);
+    box.appendChild(b);
+  }
+  if (groups.length > 1) {
+    const all = ui.el('button', 'eye-chip all' + (d.solo ? '' : ' on'), '<span>Оба</span>');
+    all.title = 'Показать все глаза вместе';
+    all.onclick = showAllEyes;
+    box.appendChild(all);
+  }
+}
+
 let dragLayerId = 0;
 
 // Первый щелчок двойного щелчка перестраивает список, поэтому двойной щелчок
@@ -1540,7 +1790,7 @@ function refreshLayers() {
   }));
 
   for (const l of d.layers.slice().reverse()) {
-    const row = ui.el('div', 'layer' + (d.active.includes(l.id) ? ' on' : '') + (l.clip ? ' clip' : '') + (l.visible ? '' : ' hid'));
+    const row = ui.el('div', 'layer' + (d.active.includes(l.id) ? ' on' : '') + (l.clip ? ' clip' : '') + (D.shown(d, l) ? '' : ' hid'));
     const eye = ui.el('button', 'layer-eye' + (l.visible ? '' : ' off'), ui.icon('eye'));
     eye.title = l.visible ? 'Скрыть слой' : 'Показать слой';
     eye.onclick = (e) => {
@@ -1653,6 +1903,7 @@ function refresh() {
   refreshTabs();
   refreshLayers();
   refreshHistory();
+  refreshEyes();
   refreshPupilPanel();
   refreshStatus();
   refreshActions();
@@ -1704,9 +1955,11 @@ const CMD = {
   open: { label: 'Открыть…', keys: 'Ctrl+O', run: () => openDialog('open') },
   place: { label: 'Поместить снимок…', keys: 'Ctrl+Shift+O', run: () => openDialog('place') },
   save: { label: 'Сохранить JPEG с номером…', keys: 'Ctrl+S', run: saveNumbered, enabled: has },
-  export: { label: 'Экспорт как…', keys: 'Ctrl+Shift+S', run: exportAs, enabled: has },
+  savePsd: { label: 'Сохранить как PSD…', keys: 'Ctrl+Shift+S', run: savePsd, enabled: has },
+  export: { label: 'Экспорт как…', keys: 'Ctrl+Shift+Alt+W', run: exportAs, enabled: has },
   close: { label: 'Закрыть документ', keys: 'Ctrl+W', run: () => closeDoc(S.cur), enabled: has },
   tplFolder: { label: 'Папка шаблонов…', run: async () => { if (await api.chooseTemplates()) ui.toast('Папка шаблонов выбрана'); } },
+  pointPrefix: { label: 'Номер точки…', run: async () => { const v = await askPrefix((await api.settings()).pointPrefix); if (v) ui.toast(`Имена файлов теперь начинаются с ${v}-`); } },
   saveFolder: { label: 'Папка готовых фото…', run: async () => { const p = await api.chooseSaveRoot(); if (p) ui.toast('Готовые фото: ' + p); } },
 
   undo: { label: 'Отменить', keys: 'Ctrl+Z', run: () => history(true), enabled: () => has() && S.cur.undo.length > 0 },
@@ -1719,6 +1972,7 @@ const CMD = {
   layerDelete: { label: 'Удалить слой', run: deleteLayers, enabled: hasLayer },
   layerUp: { label: 'Переместить выше', keys: 'Ctrl+]', run: () => moveOrder(1), enabled: hasLayer },
   layerDown: { label: 'Переместить ниже', keys: 'Ctrl+[', run: () => moveOrder(-1), enabled: hasLayer },
+  layerMerge: { label: 'Объединить слои', keys: 'Ctrl+E', run: mergeDown, enabled: hasLayer },
   layerClip: { label: 'Обтравочная маска', keys: 'Ctrl+Alt+G', run: toggleClip, enabled: hasLayer },
   layoutCorners: { label: 'Раскладка «Углы»', run: () => layoutPair('corners'), enabled: has },
   layoutWhole: { label: 'Раскладка «Целые»', run: () => layoutPair('whole'), enabled: has },
@@ -1727,10 +1981,12 @@ const CMD = {
 
   selAll: { label: 'Выделить всё', keys: 'Ctrl+A', enabled: has, run: () => {
     const d = S.cur;
-    d.sel = { shapes: [{ type: 'poly', pts: [{ x: 0, y: 0 }, { x: d.w, y: 0 }, { x: d.w, y: d.h }, { x: 0, y: d.h }] }], feather: 0 };
+    D.structEdit(d, 'Выделить всё', () => {
+      d.sel = { shapes: [{ type: 'poly', pts: [{ x: 0, y: 0 }, { x: d.w, y: 0 }, { x: d.w, y: d.h }, { x: 0, y: d.h }] }], feather: 0 };
+    });
     refresh(); requestDraw();
   } },
-  deselect: { label: 'Снять выделение', keys: 'Ctrl+D', enabled: hasSel, run: () => { S.cur.sel = null; refresh(); requestDraw(); } },
+  deselect: { label: 'Снять выделение', keys: 'Ctrl+D', enabled: hasSel, run: () => { D.structEdit(S.cur, 'Снять выделение', () => { S.cur.sel = null; }); refresh(); requestDraw(); } },
   neural: { label: 'Убрать выделенное нейронкой', keys: 'Shift+Backspace', run: removeSelection, enabled: hasSel },
 
   develop: { label: 'Проявка…', keys: 'Ctrl+Shift+A', run: developLayer, enabled: hasLayer },
@@ -1746,9 +2002,9 @@ const CMD = {
 };
 
 ui.menubar($('menus'), [
-  { title: 'Файл', items: ['new', 'open', 'place', '-', 'save', 'export', '-', 'tplFolder', 'saveFolder', '-', 'close'] },
+  { title: 'Файл', items: ['new', 'open', 'place', '-', 'save', 'savePsd', 'export', '-', 'tplFolder', 'saveFolder', 'pointPrefix', '-', 'close'] },
   { title: 'Правка', items: ['undo', 'redo', '-', 'transform', 'clear'] },
-  { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
+  { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerMerge', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
   { title: 'Фильтр', items: ['develop', 'neural'] },
   { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides'] },
@@ -1778,7 +2034,9 @@ window.addEventListener('keydown', (e) => {
   if (k === 'Ctrl+Y') { e.preventDefault(); run('redo'); return; }
   if (k === 'Ctrl+Alt+Z') { e.preventDefault(); run('undo'); return; } // «шаг назад» из фотошопа
   if (typing) return;
-  if (e.code === 'Space') { S.space = true; e.preventDefault(); return; }
+  if (e.code === 'Space') { S.space = true; setCursor(); e.preventDefault(); return; }
+  if (e.key === 'Alt') { S.alt = true; setCursor(); e.preventDefault(); return; }
+  if (e.code === 'Tab') { e.preventDefault(); document.body.classList.toggle('bare'); resize(); return; }
   if (!S.cur || S.busy) return;
   if (k === 'Backspace') { e.preventDefault(); run('clear'); return; }
   if (k === 'Esc') { if (!$('home').hidden && S.cur) showHome(false); else if (S.cur.sel) run('deselect'); return; }
@@ -1793,7 +2051,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (o && o.size && (e.code === 'BracketLeft' || e.code === 'BracketRight') && !e.ctrlKey) {
     o.size = Math.round(Math.max(4, Math.min(600, o.size * (e.code === 'BracketLeft' ? 1 / 1.2 : 1.2))));
-    refreshOptions(); requestDraw();
+    refreshOptions(); setCursor(); requestDraw();
     return;
   }
   const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.code];
@@ -1805,7 +2063,11 @@ window.addEventListener('keydown', (e) => {
     refreshHistory(); requestDraw();
   }
 });
-window.addEventListener('keyup', (e) => { if (e.code === 'Space') S.space = false; });
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') { S.space = false; setCursor(); }
+  if (e.key === 'Alt') { S.alt = false; setCursor(); e.preventDefault(); }
+});
+window.addEventListener('blur', () => { S.alt = S.space = false; });
 window.addEventListener('resize', resize);
 
 window.addEventListener('dragover', (e) => {

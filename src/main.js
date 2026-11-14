@@ -138,15 +138,36 @@ async function readFile(file) {
   return { name: path.basename(file), kind, data: await fs.readFile(file) };
 }
 
+// Исходники в студии лежат так же по дням: «исходники\ноябрь 2026\10.11».
+// Если прошлый снимок брали из такой папки, окно выбора файла открывается
+// сразу в папке за сегодня, а не во вчерашней.
+async function todaysSourceFolder() {
+  const { lastOpenDir } = await loadSettings();
+  if (!lastOpenDir) return undefined;
+  const dayLike = /^\d{1,4}[.\-_ ]\d{1,2}/.test(path.basename(lastOpenDir));
+  if (dayLike) {
+    const now = new Date();
+    for (const root of [path.dirname(path.dirname(lastOpenDir)), path.dirname(lastOpenDir), path.dirname(path.dirname(path.dirname(lastOpenDir)))]) {
+      const today = await findDayFolder(root, now);
+      if (today) return today;
+    }
+  }
+  return lastOpenDir;
+}
+
 // what: 'any' — всё, что умеем открывать; 'photo' — только снимки (для вставки слоем)
 ipcMain.handle('open-file', async (_e, what) => {
   const ext = what === 'photo' ? [...RAW_EXT, ...IMG_EXT] : [...RAW_EXT, ...IMG_EXT, ...PSD_EXT];
   const res = await dialog.showOpenDialog(win, {
     title: what === 'photo' ? 'Поместить снимок' : 'Открыть',
+    defaultPath: await todaysSourceFolder(),
     properties: ['openFile'],
     filters: [{ name: what === 'photo' ? 'Снимки' : 'Снимки и шаблоны', extensions: ext }],
   });
   if (res.canceled || !res.filePaths.length) return null;
+  if (!PSD_EXT.includes(path.extname(res.filePaths[0]).slice(1).toLowerCase())) {
+    await saveSettings({ lastOpenDir: path.dirname(res.filePaths[0]) });
+  }
   return readFile(res.filePaths[0]);
 });
 
@@ -194,28 +215,133 @@ ipcMain.handle('export-file', async (_e, { name, data, png }) => {
   return res.filePath;
 });
 
+ipcMain.handle('save-as', async (_e, { name, label, ext, data }) => {
+  const { lastSaveDir } = await loadSettings();
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Сохранить как',
+    defaultPath: lastSaveDir ? path.join(lastSaveDir, name) : name,
+    filters: [{ name: label, extensions: [ext] }],
+  });
+  if (res.canceled || !res.filePath) return null;
+  await fs.writeFile(res.filePath, Buffer.from(data));
+  await saveSettings({ lastSaveDir: path.dirname(res.filePath) });
+  return res.filePath;
+});
+
+// Только для автотестов: записать файл по пути без диалога.
+ipcMain.handle('write-path', async (_e, { file, data }) => {
+  if (!process.env.EYEPHOTO_TEST) return null;
+  await fs.writeFile(file, Buffer.from(data));
+  return file;
+});
+
+// --- Папки по дням ----------------------------------------------------------
+// В студии папки месяца и дня заводятся каждый день сами: «ноябрь 2026\10.11».
+// Программа их только находит. Имена могут немного отличаться (регистр, год,
+// разделитель), поэтому папка ищется по смыслу, а не по точному имени.
+
 const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
   'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const MONTH_STEMS = ['янв', 'фев', 'мар', 'апр', 'ма', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+const two = (n) => String(n).padStart(2, '0');
 
-// Готовый файл кладётся как <корень>\ноябрь 2026\10.11\4-1233.jpg
-ipcMain.handle('save-jpeg', async (_e, { number, data, overwrite }) => {
+function yearOk(text, now) {
+  const y = String(now.getFullYear());
+  const found = text.match(/(?<!\d)(?:\d{4}|\d{2})(?!\d)/g) || [];
+  const years = found.filter((v) => v.length === 4);
+  return !years.length || years.includes(y);
+}
+
+function isDayFolder(name, now) {
+  const n = name.trim().toLowerCase(), d = now.getDate(), m = now.getMonth() + 1, y = now.getFullYear();
+  // 10.11, 10-11, 10_11, 10.11.2026, 10.11.26
+  let t = n.match(/^(\d{1,2})[.\-_ ](\d{1,2})(?:[.\-_ ](\d{2}|\d{4}))?(?!\d)/);
+  if (t) return +t[1] === d && +t[2] === m && (!t[3] || +t[3] === y || +t[3] === y % 100);
+  // 2026-11-10
+  t = n.match(/^(\d{4})[.\-_ ](\d{1,2})[.\-_ ](\d{1,2})(?!\d)/);
+  if (t) return +t[1] === y && +t[2] === m && +t[3] === d;
+  // 10 ноября
+  t = n.match(/^(\d{1,2})\s+([а-яё]+)/);
+  return !!t && +t[1] === d && monthIndex(t[2]) === m - 1 && yearOk(n, now);
+}
+
+function monthIndex(word) {
+  // «май» и «мая» начинаются как «март», поэтому май проверяется отдельно
+  if (/^ма[йя]/.test(word)) return 4;
+  return MONTH_STEMS.findIndex((stem, i) => i !== 4 && word.startsWith(stem));
+}
+
+function isMonthFolder(name, now) {
+  const n = name.trim().toLowerCase(), m = now.getMonth(), y = now.getFullYear();
+  if (/^\d{1,2}[.\-_ ]\d{1,2}(?![.\-_ ]?\d{3})/.test(n) && !/[а-яё]/.test(n)) {
+    // 11.2026 или 2026-11
+    const a = n.match(/^(\d{1,2})[.\-_ ](\d{4})$/), b = n.match(/^(\d{4})[.\-_ ](\d{1,2})$/);
+    return !!((a && +a[1] === m + 1 && +a[2] === y) || (b && +b[1] === y && +b[2] === m + 1));
+  }
+  const b = n.match(/^(\d{4})[.\-_ ](\d{1,2})$/);
+  if (b) return +b[1] === y && +b[2] === m + 1;
+  const word = (n.match(/[а-яё]+/) || [''])[0];
+  return monthIndex(word) === m && yearOk(n, now);
+}
+
+async function subdirs(dir) {
+  try {
+    return (await fs.readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+// Папка за сегодняшний день внутри root или null. Смотрим сам корень, папки
+// месяцев и, если студия раскладывает по годам, папку года.
+async function findDayFolder(root, now) {
+  const top = await subdirs(root);
+  const day = top.find((n) => isDayFolder(n, now));
+  if (day) return path.join(root, day);
+  const months = top.filter((n) => isMonthFolder(n, now)).map((n) => path.join(root, n));
+  for (const n of top.filter((x) => x.trim() === String(now.getFullYear()))) {
+    const inner = await subdirs(path.join(root, n));
+    months.push(...inner.filter((x) => isMonthFolder(x, now)).map((x) => path.join(root, n, x)));
+    const d2 = inner.find((x) => isDayFolder(x, now));
+    if (d2) return path.join(root, n, d2);
+  }
+  for (const m of months) {
+    const d2 = (await subdirs(m)).find((n) => isDayFolder(n, now));
+    if (d2) return path.join(m, d2);
+  }
+  return null;
+}
+
+// Какую папку завести, если на сегодня её нет: в существующей папке месяца, а без неё
+// в привычном виде «ноябрь 2026\10.11».
+async function expectedDayFolder(root, now) {
+  const top = await subdirs(root);
+  const month = top.find((n) => isMonthFolder(n, now)) || `${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
+  return path.join(root, month, `${two(now.getDate())}.${two(now.getMonth() + 1)}`);
+}
+
+// Готовый файл кладётся в папку сегодняшнего дня как <цифра точки>-<номер>.jpg
+ipcMain.handle('save-jpeg', async (_e, { prefix, number, data, overwrite, create }) => {
   const { savePath } = await loadSettings();
   if (!savePath) return { status: 'no-root' };
-  if (!/^\d{4}$/.test(number)) return { status: 'bad-number' };
+  if (!/^\d{4}$/.test(number) || !/^\d{1,3}$/.test(String(prefix))) return { status: 'bad-number' };
   const now = new Date();
-  const two = (n) => String(n).padStart(2, '0');
-  const dir = path.join(savePath, `${MONTHS[now.getMonth()]} ${now.getFullYear()}`,
-    `${two(now.getDate())}.${two(now.getMonth() + 1)}`);
-  const file = path.join(dir, `4-${number}.jpg`);
   try {
-    await fs.mkdir(dir, { recursive: true });
+    let dir = await findDayFolder(savePath, now);
+    if (!dir) {
+      const expected = await expectedDayFolder(savePath, now);
+      if (!create) return { status: 'no-folder', expected: path.relative(savePath, expected) };
+      await fs.mkdir(expected, { recursive: true });
+      dir = expected;
+    }
+    const file = path.join(dir, `${prefix}-${number}.jpg`);
     if (!overwrite) {
       try { await fs.access(file); return { status: 'exists', file }; } catch { /* файла нет */ }
     }
     await fs.writeFile(file, Buffer.from(data));
     return { status: 'ok', file };
   } catch (e) {
-    return { status: 'error', message: e.message, file };
+    return { status: 'error', message: e.message };
   }
 });
 

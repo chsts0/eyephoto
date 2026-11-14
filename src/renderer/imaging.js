@@ -270,14 +270,23 @@ export function patchRegion(canvas, bbox) {
   return { x, y, w: side, h: side };
 }
 
-export async function inpaintPatch(canvas, mask, region, run) {
+// under(ctx, N) — необязательная подложка: рисует в квадрат N×N то, что лежит
+// под слоем в этом же месте (исходный снимок под вырезанным глазом). С ней модель
+// у края круга видит продолжение радужки и дорисовывает по границе. Без подложки
+// прозрачное место отдаётся модели как «дорисуй сама», иначе она приняла бы
+// пустоту за чёрный предмет и затянула бы им половину глаза.
+export async function inpaintPatch(canvas, mask, region, run, under) {
   const N = 512, side = region.w;
   const small = makeCanvas(N, N);
   const sx = small.getContext('2d', { willReadFrequently: true });
   sx.imageSmoothingQuality = 'high';
+  sx.drawImage(canvas, region.x, region.y, side, side, 0, 0, N, N);
+  const alpha = sx.getImageData(0, 0, N, N).data;
+  sx.globalCompositeOperation = 'destination-over';
+  if (under) under(sx, N);
   sx.fillStyle = '#000';
   sx.fillRect(0, 0, N, N);
-  sx.drawImage(canvas, region.x, region.y, side, side, 0, 0, N, N);
+  sx.globalCompositeOperation = 'source-over';
   const rgba = sx.getImageData(0, 0, N, N).data;
 
   const sm = makeCanvas(N, N);
@@ -285,7 +294,7 @@ export async function inpaintPatch(canvas, mask, region, run) {
   mx.drawImage(mask, 0, 0, side, side, 0, 0, N, N);
   const md = mx.getImageData(0, 0, N, N).data;
   const m = new Uint8Array(N * N);
-  for (let i = 0; i < m.length; i++) m[i] = md[i * 4 + 3] > 20 ? 255 : 0;
+  for (let i = 0; i < m.length; i++) m[i] = md[i * 4 + 3] > 20 || (!under && alpha[i * 4 + 3] < 128) ? 255 : 0;
 
   const out = await run(new Uint8Array(rgba.buffer), m);
   sx.putImageData(new ImageData(new Uint8ClampedArray(out), N, N), 0, 0);

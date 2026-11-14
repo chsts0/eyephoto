@@ -3,7 +3,7 @@
 import * as im from './imaging.js';
 
 let nextId = 1;
-const HISTORY_LIMIT = 40;
+const HISTORY_LIMIT = 60;
 
 // Слой хранит свои пиксели в исходном разрешении, а положение, масштаб и поворот
 // отдельно. Поэтому глаз можно сколько угодно двигать и менять в размере
@@ -20,6 +20,8 @@ export function makeLayer(props) {
     cache: null,    // проявленная копия для показа
     cacheScale: 1,
     dirty: true,
+    eye: 0,         // к какому глазу относится слой: снимок и всё, что из него вырезано, делят один номер
+    eyeKey: '',     // подпись глаза, последние цифры имени файла
     rev: 0,         // растёт при каждом изменении вида слоя; по нему обновляются миниатюра и уменьшенная копия
     ...props,
   };
@@ -31,6 +33,7 @@ export function makeDoc({ name, w, h, dpi = im.DPI, background = true }) {
     layers: [],        // снизу вверх
     active: [],        // id выделенных слоёв
     sel: null,         // выделение: { shapes: [...], feather }
+    solo: 0,           // номер глаза, который показан один, или 0, если видны все
     undo: [], redo: [],
     view: { scale: 1, ox: 0, oy: 0, fitted: false },
     changed: false,
@@ -53,6 +56,23 @@ export const activeLayer = (doc) => {
   return a.length ? a[a.length - 1] : null;
 };
 export const nextName = (doc) => `Слой ${doc.counter++}`;
+
+// Виден ли слой на экране. Когда выбран один глаз, слои остальных глаз не
+// рисуются, хотя в самих слоях ничего не выключается.
+export const shown = (doc, l) => l.visible && (!doc.solo || !l.eye || l.eye === doc.solo);
+
+// Глаза документа в порядке появления: [{ id, key, layer }], layer — что показывать
+// на карточке и выбирать: вырезанный глаз, а пока его нет, сам снимок.
+export function eyeGroups(doc) {
+  const out = [];
+  for (const l of doc.layers) {
+    if (!l.eye) continue;
+    let g = out.find((x) => x.id === l.eye);
+    if (!g) out.push(g = { id: l.eye, key: l.eyeKey, layer: l, cut: false });
+    if (l.kind === 'eye') { g.layer = l; g.cut = true; }
+  }
+  return out.sort((a, b) => a.id - b.id);
+}
 
 // --- Координаты -------------------------------------------------------------
 
@@ -156,15 +176,15 @@ function drawLayer(ctx, l, full, draft, zoom) {
 
 // Рисует все видимые слои. На ctx уже должен стоять перевод «лист -> экран».
 // Слой с обтравкой виден только там, где есть пиксели слоя под ним.
-export function composite(ctx, doc, { full = false, draftId = 0, zoom = 1 } = {}) {
-  const ls = doc.layers;
+export function composite(ctx, doc, { full = false, draftId = 0, zoom = 1, solo = false } = {}) {
+  const ls = doc.layers, vis = (l) => (solo ? shown(doc, l) : l.visible);
   for (let i = 0; i < ls.length; i++) {
     const base = ls[i];
     if (base.clip && i > 0) continue; // нарисован вместе со своей основой
     let j = i + 1;
     while (j < ls.length && ls[j].clip) j++;
-    const clipped = ls.slice(i + 1, j).filter((l) => l.visible);
-    if (!base.visible) continue;
+    const clipped = ls.slice(i + 1, j).filter(vis);
+    if (!vis(base)) continue;
     ctx.globalAlpha = base.opacity;
     ctx.globalCompositeOperation = base.blend;
     if (!clipped.length) {
@@ -188,6 +208,49 @@ export function composite(ctx, doc, { full = false, draftId = 0, zoom = 1 } = {}
   }
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
+}
+
+// Слой, переведённый в пиксели листа: так он хранится в PSD.
+// Проявка, масштаб и поворот при этом запекаются в картинку.
+export function rasterize(l) {
+  const b = bounds(l);
+  const left = Math.floor(b.x), top = Math.floor(b.y);
+  const c = im.makeCanvas(Math.ceil(b.x + b.w) - left, Math.ceil(b.y + b.h) - top);
+  const x = c.getContext('2d');
+  x.imageSmoothingQuality = 'high';
+  x.translate(-left, -top);
+  drawLayer(x, l, true, false, 1);
+  return { canvas: c, left, top };
+}
+
+// Объединяет верхний слой с нижним. Результат остаётся в разрешении нижнего слоя,
+// чтобы глаз не потерял качество. Проявка сохраняется, только если у обоих слоёв
+// она одинаковая; иначе запекается в пиксели.
+export function merged(lower, upper) {
+  const same = JSON.stringify(lower.adjust) === JSON.stringify(upper.adjust);
+  const pts = corners(upper).map((p) => toLocal(lower, p));
+  const x0 = Math.floor(Math.min(0, ...pts.map((p) => p.x))), y0 = Math.floor(Math.min(0, ...pts.map((p) => p.y)));
+  const x1 = Math.ceil(Math.max(lower.canvas.width, ...pts.map((p) => p.x)));
+  const y1 = Math.ceil(Math.max(lower.canvas.height, ...pts.map((p) => p.y)));
+  const c = im.makeCanvas(x1 - x0, y1 - y0), x = c.getContext('2d');
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(same ? lower.canvas : layerFull(lower), -x0, -y0);
+  x.save();
+  x.translate(-x0, -y0);
+  docToLayerTransform(x, lower);
+  layerToDocTransform(x, upper, 1);
+  x.globalAlpha = upper.opacity;
+  x.globalCompositeOperation = upper.blend;
+  x.drawImage(same ? upper.canvas : layerFull(upper), 0, 0);
+  x.restore();
+  const center = toDoc(lower, { x: (x0 + x1) / 2, y: (y0 + y1) / 2 });
+  return makeLayer({
+    name: lower.name, kind: lower.kind, canvas: c, cx: center.x, cy: center.y, scale: lower.scale, rot: lower.rot,
+    visible: lower.visible, opacity: lower.opacity, blend: lower.blend, clip: lower.clip, locked: false,
+    adjust: same && lower.adjust ? { ...lower.adjust } : null,
+    eye: lower.eye, eyeKey: lower.eyeKey,
+    src: lower.src && { id: lower.src.id, x: lower.src.x + x0, y: lower.src.y + y0 },
+  });
 }
 
 export function flatten(doc, background = '#000') {
@@ -292,6 +355,7 @@ function snapshot(doc) {
   return {
     layers: doc.layers.slice(),
     active: doc.active.slice(),
+    sel: doc.sel && JSON.stringify(doc.sel),
     props: doc.layers.map((l) => [l, {
       name: l.name, cx: l.cx, cy: l.cy, scale: l.scale, rot: l.rot, visible: l.visible,
       opacity: l.opacity, blend: l.blend, clip: l.clip, locked: l.locked, adjust: l.adjust && { ...l.adjust },
@@ -302,6 +366,7 @@ function snapshot(doc) {
 function restore(doc, s) {
   doc.layers = s.layers.slice();
   doc.active = s.active.slice();
+  doc.sel = s.sel ? JSON.parse(s.sel) : null;
   for (const [l, p] of s.props) {
     if (JSON.stringify(l.adjust) !== JSON.stringify(p.adjust)) touch(l);
     Object.assign(l, p, { adjust: p.adjust && { ...p.adjust } });
@@ -334,6 +399,22 @@ export function pushPixels(doc, layer, name, x, y, data) {
       ctx.putImageData(data, x, y);
       data = now;
       touch(layer);
+    },
+  });
+}
+
+// Склеивает последние n записей в одну: одно действие пользователя должно
+// отменяться одним нажатием, даже если внутри оно состояло из нескольких шагов.
+export function mergeLast(doc, n, name) {
+  const parts = doc.undo.splice(-n);
+  if (parts.length < 2) { doc.undo.push(...parts); return; }
+  let undone = false;
+  doc.undo.push({
+    name,
+    swap() {
+      // отмена идёт с конца, возврат с начала
+      for (const p of (undone ? parts : parts.slice().reverse())) p.swap();
+      undone = !undone;
     },
   });
 }

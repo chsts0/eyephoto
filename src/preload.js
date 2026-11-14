@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('eyephoto', {
   chooseTemplates: () => ipcRenderer.invoke('templates-choose'),
   readTemplate: (file) => ipcRenderer.invoke('templates-read', file),
   exportFile: (payload) => ipcRenderer.invoke('export-file', payload),
+  saveAs: (payload) => ipcRenderer.invoke('save-as', payload),
+  writePath: (payload) => ipcRenderer.invoke('write-path', payload),
   setDirty: (v) => ipcRenderer.send('set-dirty', v),
 
   settings: () => ipcRenderer.invoke('settings-get'),

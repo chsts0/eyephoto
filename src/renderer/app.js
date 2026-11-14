@@ -1570,6 +1570,7 @@ window.addEventListener('keydown', (e) => {
   if (typing && !k.startsWith('Ctrl+')) return;
   if (BY_KEYS[k]) { e.preventDefault(); run(BY_KEYS[k]); return; }
   if (k === 'Ctrl+Y') { e.preventDefault(); run('redo'); return; }
+  if (k === 'Ctrl+Alt+Z') { e.preventDefault(); run('undo'); return; } // «шаг назад» из фотошопа
   if (typing) return;
   if (e.code === 'Space') { S.space = true; e.preventDefault(); return; }
   if (!S.cur || S.busy) return;
@@ -1578,6 +1579,12 @@ window.addEventListener('keydown', (e) => {
   if (k === 'Enter' && S.tool === 'pupil') { applyPupil(); return; }
   if (TOOL_KEYS[k]) { setTool(TOOL_KEYS[k]); return; }
   const o = S.opts[S.tool];
+  if (k === 'D') { S.opts.brush.color = '#000000'; refreshOptions(); return; }
+  if (o && o.hard != null && (k === 'Shift+[' || k === 'Shift+]')) {
+    o.hard = Math.max(0, Math.min(100, o.hard + (k === 'Shift+[' ? -25 : 25)));
+    refreshOptions();
+    return;
+  }
   if (o && o.size && (e.code === 'BracketLeft' || e.code === 'BracketRight') && !e.ctrlKey) {
     o.size = Math.round(Math.max(4, Math.min(600, o.size * (e.code === 'BracketLeft' ? 1 / 1.2 : 1.2))));
     refreshOptions(); requestDraw();

@@ -18,6 +18,7 @@ const S = {
   docs: [],
   cur: null,          // открытый документ
   tool: 'move',
+  pupilSoft: 100,     // мягкость края зрачка после сужения, % от студийной
   opts: {
     move: { auto: true },
     marquee: { center: true, circle: true, feather: 8 },
@@ -633,7 +634,7 @@ async function showHome(on) {
   $('homeClose').hidden = !over;
   if (!on) return;
   const t = await api.templates();
-  $('tplFolder').textContent = t.dir ? 'Сменить папку' : 'Выбрать папку';
+  $('tplFolder').textContent = t.dir ? 'Сменить папку' : 'Своя папка';
   const box = $('tplCards');
   box.textContent = '';
   for (const item of t.items) {
@@ -703,9 +704,10 @@ async function ensureModel() {
   if (S.modelReady) return true;
   if ((await api.modelStatus()).ready) return (S.modelReady = true);
   const go = await ui.ask({
-    title: 'Нужно один раз скачать нейронку',
-    text: 'Она убирает блики и ресницы. Весит 200 МБ, скачивается один раз и дальше работает без интернета.',
+    title: 'Скачать нейронку',
+    text: 'Убирает блики и ресницы. 200 МБ, один раз, дальше работает без интернета.',
     ok: 'Скачать',
+    cancel: 'Позже',
   });
   if (!go) return false;
   const p = ui.progress('Скачиваю нейронку', 'Не закрывайте программу.');
@@ -728,13 +730,20 @@ async function neuralRemove(l, paint, box) {
   mx.translate(-region.x, -region.y);
   paint(mx, (c) => { c.translate(-region.x, -region.y); D.docToLayerTransform(c, l); }, pad);
   const before = l.canvas.getContext('2d').getImageData(region.x, region.y, region.w, region.h);
+  S.variants = null; // прошлые варианты больше не нужны, их фоновый расчёт остановится
   await setBusy('Убираю лишнее');
+  let start = null;
   try {
     // под вырезанным глазом лежит его исходный снимок: по нему модель видит, что за краем круга
     const photo = l.src && D.layerById(d, l.src.id);
     const under = photo && ((x, N) => x.drawImage(photo.canvas, region.x + l.src.x, region.y + l.src.y, region.w, region.h, 0, 0, N, N));
-    await im.inpaintPatch(l.canvas, mask, region, (rgba, m) => api.inpaint({ rgba, mask: m }), under, irisOf(l));
+    // варианты считаются по копии слоя «до», чтобы второй и третий не видели первый
+    const work = im.cloneCanvas(l.canvas);
+    const make = (k) => im.makePatch(work, mask, region, (rgba, m) => api.inpaint({ rgba, mask: m }), under, irisOf(l), k);
+    const first = await make(0);
+    im.applyPatch(l.canvas, first, region);
     D.pushPixels(d, l, 'Убрать нейронкой', region.x, region.y, before);
+    start = () => startVariants({ d, l, region, before, make, bbox, patches: [first] });
   } catch (e) {
     console.error(e);
     setBusy('');
@@ -743,6 +752,60 @@ async function neuralRemove(l, paint, box) {
   setBusy('');
   refresh();
   requestDraw();
+  return start;
+}
+
+// --- Варианты заплатки, как «Варианты» в фотошопе -------------------------------
+// Первый вклеивается сразу, два других досчитываются в фоне и появляются внизу
+// миниатюрами. Переключение меняет пиксели внутри той же записи истории.
+// Любое другое действие прячет выбор.
+
+function variantsLive() {
+  const v = S.variants;
+  return !!(v && S.cur === v.d && v.d.undo[v.d.undo.length - 1] === v.top && !v.d.sel && D.layerById(v.d, v.l.id));
+}
+
+async function startVariants(v) {
+  v.top = v.d.undo[v.d.undo.length - 1];
+  v.cur = 0;
+  S.variants = v;
+  refreshCtx();
+  for (let k = 1; k < im.VARIANTS; k++) {
+    let p;
+    try { p = await v.make(k); } catch (e) { console.error(e); break; }
+    if (S.variants !== v) return;
+    v.patches[k] = p;
+    refreshCtx();
+  }
+}
+
+function pickVariant(k) {
+  const v = S.variants;
+  if (!variantsLive() || !v.patches[k] || v.cur === k) return;
+  const { l, region } = v;
+  l.canvas.getContext('2d').putImageData(v.before, region.x, region.y);
+  im.applyPatch(l.canvas, v.patches[k], region);
+  D.touchRect(l, region.x, region.y, region.w, region.h);
+  v.cur = k;
+  refreshCtx();
+  requestDraw();
+}
+
+function variantThumb(v, k) {
+  const c = im.makeCanvas(44, 44);
+  if (!v.patches[k]) return c;
+  const { region, bbox } = v;
+  const t = im.makeCanvas(region.w, region.h), tx = t.getContext('2d');
+  tx.putImageData(v.before, 0, 0);
+  tx.globalCompositeOperation = 'source-atop';
+  tx.drawImage(v.patches[k], 0, 0);
+  const side = Math.min(region.w, Math.max(bbox.w, bbox.h) * 1.5);
+  const cx = bbox.x + bbox.w / 2 - region.x, cy = bbox.y + bbox.h / 2 - region.y;
+  const x = Math.max(0, Math.min(region.w - side, cx - side / 2)), y = Math.max(0, Math.min(region.h - side, cy - side / 2));
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(t, x, y, side, side, 0, 0, 44, 44);
+  return c;
 }
 
 // Где у слоя зрачок и какого размера радужка: нужно нейронке для больших мест.
@@ -767,12 +830,14 @@ function removeSelection() {
     const m = D.selMask(sel, _mx.canvas.width, _mx.canvas.height, setT, { grow: pad });
     _mx.setTransform(1, 0, 0, 1, 0, 0);
     _mx.drawImage(m, 0, 0);
-  }, D.selBounds(sel)).then(() => {
-    if (d.sel !== sel) return;
-    const n = d.undo.length;
-    D.structEdit(d, 'Снять выделение', () => { d.sel = null; });
-    // правка пикселей и снятие выделения отменяются одним шагом
-    if (n && d.undo[n - 1].name === 'Убрать нейронкой') D.mergeLast(d, 2, 'Убрать нейронкой');
+  }, D.selBounds(sel)).then((start) => {
+    if (d.sel === sel) {
+      const n = d.undo.length;
+      D.structEdit(d, 'Снять выделение', () => { d.sel = null; });
+      // правка пикселей и снятие выделения отменяются одним шагом
+      if (n && d.undo[n - 1].name === 'Убрать нейронкой') D.mergeLast(d, 2, 'Убрать нейронкой');
+    }
+    if (start) start();
     refresh(); requestDraw();
   });
 }
@@ -788,7 +853,7 @@ function removeStroke(l, g) {
     g.pts.forEach((p, i) => (i ? mx.lineTo(p.x, p.y) : mx.moveTo(p.x, p.y)));
     if (g.pts.length === 1) mx.lineTo(g.pts[0].x + 0.01, g.pts[0].y);
     mx.stroke();
-  }, box);
+  }, box).then((start) => start && start());
 }
 
 // --- Действия со слоями -----------------------------------------------------
@@ -1478,7 +1543,7 @@ function applyPupil() {
   const rect = im.pupilRect(l.canvas, lp, R);
   if (rect.w < 2 || rect.h < 2) return;
   const before = l.canvas.getContext('2d').getImageData(rect.x, rect.y, rect.w, rect.h);
-  im.shrinkPupil(l.canvas, lp, R, im.PUPIL_RATIO);
+  im.shrinkPupil(l.canvas, lp, R, im.PUPIL_RATIO, S.pupilSoft / 100);
   D.pushPixels(d, l, 'Сузить зрачок', rect.x, rect.y, before);
   // дело сделано: круг убираем и возвращаем инструмент, которым работали до этого
   S.pupil = null;
@@ -1504,11 +1569,30 @@ const pupilUi = {};
   });
   pupilUi.go = ui.el('button', 'btn wide', 'Сузить зрачок');
   pupilUi.go.onclick = () => {
-    if (S.tool !== 'pupil') { setTool('pupil'); ui.toast('Подведите круг к краю зрачка и нажмите ещё раз'); return; }
+    if (S.tool !== 'pupil') { setTool('pupil'); return; }
     applyPupil();
   };
-  pupilUi.note = ui.el('p', 'panel-note', '');
-  box.append(pupilUi.now, pupilUi.go, pupilUi.note);
+  box.append(pupilUi.now, pupilUi.go);
+
+  // Настройки, которые выставляют один раз: свёрнуты под шестерёнкой и запоминаются.
+  const more = ui.el('div', 'pupil-more');
+  more.hidden = true;
+  const toggle = ui.el('button', 'pupil-gear', ui.icon('gear'));
+  toggle.title = 'Настройки края';
+  toggle.onclick = () => { more.hidden = !more.hidden; toggle.classList.toggle('on', !more.hidden); };
+  pupilUi.feather = ui.slider({
+    label: 'Растушёвка глаза', min: 0, max: 40, value: S.opts.marquee.feather, unit: ' px',
+    onInput: (v) => { S.opts.marquee.feather = v; if (S.cur && S.cur.sel && S.tool === 'marquee') S.cur.sel.feather = v; requestOverlay(); },
+    onChange: (v) => api.setSettings({ eyeFeather: v }),
+  });
+  pupilUi.soft = ui.slider({
+    label: 'Мягкость зрачка', min: 30, max: 300, step: 5, value: S.pupilSoft, unit: '%',
+    onInput: (v) => { S.pupilSoft = v; },
+    onChange: (v) => api.setSettings({ pupilSoft: v }),
+  });
+  more.append(pupilUi.feather, pupilUi.soft);
+  $('pupilPanel').querySelector('.panel-head, header, h3').appendChild(toggle);
+  box.append(more);
 })();
 
 function syncPupilPanel() {
@@ -1522,8 +1606,6 @@ function refreshPupilPanel() {
   const l = layer(), ok = !!(l && D.shown(S.cur, l) && l.kind !== 'photo');
   pupilUi.go.disabled = !ok;
   pupilUi.now.classList.toggle('off', !ok);
-  pupilUi.note.textContent = ok ? '' : l && l.kind === 'photo' ? 'Сначала вырежьте глаз: круг по радужке и Ctrl+J.' : 'Выберите слой с глазом.';
-  pupilUi.note.hidden = ok;
   syncPupilPanel();
 }
 
@@ -1804,7 +1886,11 @@ function moveHit(p) {
 
 // Ctrl с любым рисующим инструментом временно даёт перемещение, как в фотошопе.
 const TEMP_MOVE = ['marquee', 'lasso', 'patch', 'heal', 'stamp', 'brush', 'eraser', 'burn', 'pupil'];
-const tempMove = (e) => e.ctrlKey && TEMP_MOVE.includes(S.tool);
+// на маке вместо Ctrl работает Cmd, как в фотошопе
+const MAC = api.platform === 'darwin';
+const MOVE_KEY = MAC ? 'Meta' : 'Control';
+const modKey = (e) => (MAC ? e.metaKey : e.ctrlKey);
+const tempMove = (e) => modKey(e) && TEMP_MOVE.includes(S.tool);
 
 // Перемещение. С автовыбором щелчок по глазу выбирает его, щелчок мимо слоёв
 // снимает выбор. Если выбрано несколько слоёв, перетаскивание двигает все,
@@ -1859,14 +1945,15 @@ canvas.addEventListener('pointerdown', (e) => {
   if (!d || S.busy) return;
   const p = toDocPt(e), o = S.opts[S.tool];
   canvas.setPointerCapture(e.pointerId);
-  // Alt + правая кнопка: влево-вправо размер кисти, вверх-вниз жёсткость
-  if (e.button === 2 && e.altKey && o && o.size) {
+  // Alt + правая кнопка: влево-вправо размер кисти, вверх-вниз жёсткость.
+  // На маке, как в фотошопе, ещё Ctrl+Option и обычный щелчок (удобно с трекпада).
+  if ((e.button === 2 || (MAC && e.ctrlKey)) && e.altKey && o && o.size) {
     S.drag = { type: 'brushsize', sx: e.clientX, sy: e.clientY, at: p, size0: o.size, hard0: o.hard };
     S.cursor = p;
     return;
   }
   // Ctrl+пробел щелчок приближает, Alt+пробел отдаляет
-  if (S.space && e.button === 0 && (e.ctrlKey || e.altKey)) {
+  if (S.space && e.button === 0 && (modKey(e) || e.altKey)) {
     const r = canvas.getBoundingClientRect();
     zoomAt(e.clientX - r.left, e.clientY - r.top, e.altKey ? 1 / 1.5 : 1.5);
     return;
@@ -1905,7 +1992,7 @@ canvas.addEventListener('pointerdown', (e) => {
   } else if (S.tool === 'patch') {
     if (paintLayer()) S.drag = { type: 'patch', pts: [p], size: o.size };
   } else if (S.tool === 'stamp' || S.tool === 'heal') {
-    if (e.altKey) { S.stampSrc = p; S.stampOff = null; ui.toast('Источник задан. Теперь рисуйте там, куда переносить'); }
+    if (e.altKey) { S.stampSrc = p; S.stampOff = null; }
     else if (!S.stampSrc) ui.toast('Сначала Alt+щелчок там, откуда брать');
     else { const l = paintLayer(); if (l) beginStroke(l, S.tool, p, e); }
   } else if (S.tool === 'brush' || S.tool === 'eraser' || S.tool === 'burn') {
@@ -2054,11 +2141,18 @@ canvas.addEventListener('wheel', (e) => {
   const r = canvas.getBoundingClientRect(), d = S.cur;
   if (!d) return;
   S.wheeling = true;
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  // щипок на трекпаде браузер присылает как колесо с Ctrl, хотя Ctrl никто не жмёт
+  if (e.ctrlKey && !S.ctrlPhys) { zoomAt(x, y, Math.exp(-e.deltaY * 0.01)); return; }
   // как в фотошопе: колесо листает вверх-вниз, с Ctrl или Shift вбок, с Alt масштабирует
-  if (e.altKey) { zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.15 : 1 / 1.15); return; }
+  if (e.altKey) {
+    const smooth = e.deltaMode === 0 && Math.abs(e.deltaY) < 40; // трекпад: много мелких шагов
+    zoomAt(x, y, smooth ? Math.exp(-e.deltaY * 0.006) : e.deltaY < 0 ? 1.15 : 1 / 1.15);
+    return;
+  }
   const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
   let dx = e.deltaX * unit, dy = e.deltaY * unit;
-  if (e.ctrlKey || e.shiftKey) { dx = dx || dy; dy = 0; }
+  if (modKey(e) || e.shiftKey) { dx = dx || dy; dy = 0; }
   d.view.ox -= dx; d.view.oy -= dy;
   requestDraw();
 }, { passive: false });
@@ -2069,7 +2163,7 @@ function refreshOptions() {
   document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('on', b.dataset.tool === S.tool));
   const bar = $('optbar'), info = toolInfo(S.tool), o = S.opts[S.tool] || {};
   bar.textContent = '';
-  if (!S.cur) { bar.appendChild(ui.el('div', 'opt-hint start', 'Выберите чистый лист или шаблон, чтобы начать')); return; }
+  if (!S.cur) return;
   bar.appendChild(ui.el('div', 'opt-tool', ui.icon(S.tool) + `<span>${info[1]}</span>`));
   const add = (node) => { const w = ui.el('div', 'opt'); w.appendChild(node); bar.appendChild(w); return node; };
   const range = (label, key, min, max, unit = '', step = 1) => add(ui.slider({
@@ -2154,7 +2248,6 @@ function refreshOptions() {
     button('Вписать в окно', fit);
     button('100%', () => zoomAt(...center(), 1, 1));
   }
-  bar.appendChild(ui.el('div', 'opt-hint', info[3]));
 }
 
 // --- Панели справа ----------------------------------------------------------
@@ -2202,7 +2295,6 @@ function devSection(title, open, build) {
 
 devSection('Свет', true, (box) => DEV_LIGHT.forEach((r) => box.appendChild(devSlider(r))));
 devSection('Цвет', true, (box) => {
-  box.appendChild(ui.el('div', 'dev-sub', 'Баланс белого: как снято, ниже поправка'));
   DEV_COLOR.forEach((r) => box.appendChild(devSlider(r)));
 });
 devSection('Смешение цветов', false, (box) => {
@@ -2571,7 +2663,6 @@ function refresh() {
   refreshActions();
   refreshCtx();
   const d = S.cur;
-  $('docHint').hidden = !d || !$('home').hidden || d.layers.some((l) => l.kind === 'photo' || l.kind === 'eye');
   $('saveBtn').disabled = $('placeBtn').disabled = false;
   $('saveBtn').disabled = !d;
   $('developBtn').disabled = !layer();
@@ -2581,6 +2672,21 @@ function refresh() {
 // после круга по снимку глаз вырезают, после лассо лишнее убирают.
 function refreshCtx() {
   const d = S.cur, bar = $('ctxbar');
+  bar.classList.remove('variants');
+  if (!(d && d.sel) && variantsLive()) {
+    const v = S.variants;
+    bar.hidden = false;
+    bar.classList.add('variants');
+    bar.textContent = '';
+    for (let k = 0; k < im.VARIANTS; k++) {
+      const b = ui.el('button', 'var' + (v.cur === k ? ' on' : ''));
+      if (v.patches[k]) { v.thumbs = v.thumbs || []; b.appendChild(v.thumbs[k] || (v.thumbs[k] = variantThumb(v, k))); }
+      else { b.disabled = true; b.appendChild(ui.el('span', 'var-wait')); }
+      b.onclick = () => pickVariant(k);
+      bar.appendChild(b);
+    }
+    return;
+  }
   bar.hidden = !(d && d.sel);
   if (bar.hidden) return;
   const l = layer();
@@ -2698,7 +2804,8 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   if (e.code === 'Space') { S.space = true; setCursor(); e.preventDefault(); return; }
   if (e.key === 'Alt') { S.alt = true; setCursor(); e.preventDefault(); return; }
-  if (e.key === 'Control') { S.ctrl = true; setCursor(); requestOverlay(); return; }
+  if (e.key === 'Control') S.ctrlPhys = true;
+  if (e.key === MOVE_KEY) { S.ctrl = true; setCursor(); requestOverlay(); return; }
   if (e.code === 'Tab') { e.preventDefault(); document.body.classList.toggle('bare'); resize(); return; }
   if (!S.cur || S.busy) return;
   if (k === 'Backspace') { e.preventDefault(); run('clear'); return; }
@@ -2744,7 +2851,8 @@ window.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('keyup', (e) => {
-  if (e.key === 'Control') { S.ctrl = false; setCursor(); requestOverlay(); }
+  if (e.key === 'Control') S.ctrlPhys = false;
+  if (e.key === MOVE_KEY) { S.ctrl = false; setCursor(); requestOverlay(); }
   if (S.spring && e.code === S.spring.key) {
     const sp = S.spring;
     S.spring = null;
@@ -2753,7 +2861,7 @@ window.addEventListener('keyup', (e) => {
   if (e.code === 'Space') { S.space = false; setCursor(); }
   if (e.key === 'Alt') { S.alt = false; setCursor(); e.preventDefault(); }
 });
-window.addEventListener('blur', () => { S.alt = S.space = S.ctrl = false; S.spring = null; });
+window.addEventListener('blur', () => { S.alt = S.space = S.ctrl = S.ctrlPhys = false; S.spring = null; });
 window.addEventListener('resize', resize);
 
 window.addEventListener('dragover', (e) => {
@@ -2796,11 +2904,14 @@ api.onUpdateStatus((s) => {
 });
 
 api.version().then((v) => { $('version').textContent = v; });
-api.modelStatus().then((s) => { S.modelReady = s.ready; });
+// первый запуск: сразу предлагаем скачать нейронку, чтобы потом не ждать посреди работы
+api.modelStatus().then((s) => { S.modelReady = s.ready; if (!s.ready) setTimeout(ensureModel, 600); });
 loadTemplateList();
 
 api.settings().then((s) => {
   if (s.guides === false) S.guides = false;
+  if (typeof s.eyeFeather === 'number') { S.opts.marquee.feather = s.eyeFeather; pupilUi.feather.set(s.eyeFeather); }
+  if (typeof s.pupilSoft === 'number') { S.pupilSoft = s.pupilSoft; pupilUi.soft.set(s.pupilSoft); }
 });
 
 refreshOptions();

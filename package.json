@@ -1,7 +1,7 @@
 {
   "name": "eyephoto",
   "productName": "EyePhoto",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Редактор снимков радужки для студии",
   "main": "src/main.js",
   "author": "EyePhoto",
@@ -71,6 +71,15 @@
     "dmg": {
       "artifactName": "EyePhoto-${version}-mac.${ext}"
     },
+    "extraResources": [
+      {
+        "from": "templates",
+        "to": "templates",
+        "filter": [
+          "*.psd"
+        ]
+      }
+    ],
     "afterPack": "build-scripts/after-pack.js"
   }
 }

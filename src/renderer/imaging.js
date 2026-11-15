@@ -308,7 +308,7 @@ export function pupilRect(canvas, pupil, R) {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, zone };
 }
 
-export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO) {
+export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO, soft = 1) {
   const target = R * ratio;
   const rect = pupilRect(canvas, pupil, R);
   const { zone } = rect;
@@ -349,7 +349,7 @@ export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO) {
   }
   // Чёрный зрачок с мягким краем. Растушёвка в фотошопе даёт плавный переход
   // по нормальному закону, поэтому и здесь край считается так же.
-  fillPupil(x, pupil.x, pupil.y, target * PUPIL_EDGE_CENTER, target * PUPIL_EDGE_SIGMA);
+  fillPupil(x, pupil.x, pupil.y, target * PUPIL_EDGE_CENTER, target * PUPIL_EDGE_SIGMA * soft);
   return rect;
 }
 
@@ -407,7 +407,7 @@ function chooseTurn(canvas, mask, region, iris) {
   const all = pts.length;
   for (let i = pts.length - 1; i >= 0; i--) if (Math.hypot(pts[i][0] - iris.x, pts[i][1] - iris.y) > iris.R * 0.97) pts.splice(i, 1);
   if (pts.length < all * 0.5) return null; // место в основном не на радужке
-  let best = null;
+  const all2 = [];
   for (let deg = 20; deg <= 180; deg += 10) {
     for (const sgn of [1, -1]) {
       const a = sgn * deg * Math.PI / 180, c = Math.cos(-a), sn = Math.sin(-a);
@@ -419,10 +419,26 @@ function chooseTurn(canvas, mask, region, iris) {
         if (L != null && L < 225 && !inMask(qx, qy)) good++;
       }
       const score = good / pts.length - deg * 0.0008; // при равенстве берём поворот поменьше: свет похожее
-      if (!best || score > best.score) best = { a, score, good: good / pts.length };
+      all2.push({ a, score, good: good / pts.length });
     }
   }
-  return best && best.good > 0.92 ? best.a : null;
+  // годные повороты по убыванию, соседние (ближе 30°) не повторяем: для вариантов
+  const out = [];
+  for (const t of all2.filter((t) => t.good > 0.92).sort((p, q) => q.score - p.score)) {
+    if (out.every((a) => Math.abs(a - t.a) > Math.PI / 6 + 1e-6)) out.push(t.a);
+  }
+  return out;
+}
+
+// Отражение квадрата N×N (rgba по 4 байта или маска по 1) по горизонтали или вертикали.
+function flipSquare(a, N, ch, how) {
+  const o = new Uint8Array(a.length);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const sx = how === 'h' ? N - 1 - x : x, sy = how === 'v' ? N - 1 - y : y;
+    const i = (y * N + x) * ch, j = (sy * N + sx) * ch;
+    for (let c = 0; c < ch; c++) o[i + c] = a[j + c];
+  }
+  return o;
 }
 
 function detailFromTurn(canvas, region, lamaUp, iris, angle, sigma) {
@@ -448,7 +464,14 @@ function detailFromTurn(canvas, region, lamaUp, iris, angle, sigma) {
   return out;
 }
 
-export async function inpaintPatch(canvas, mask, region, run, under, iris) {
+// Варианты как в фотошопе: модель на одном и том же входе всегда отвечает одинаково,
+// поэтому каждый вариант получает место по-своему: как есть, отражённым
+// по горизонтали, отражённым по вертикали. Мелкий рисунок на больших местах берётся
+// с разных поворотов. Считается по копии слоя, сам слой не трогается.
+export const VARIANTS = 3;
+const FLIPS = [null, 'h', 'v'];
+
+export async function makePatch(canvas, mask, region, run, under, iris, variant = 0) {
   const N = 512, side = region.w;
   const small = makeCanvas(N, N);
   const sx = small.getContext('2d', { willReadFrequently: true });
@@ -460,17 +483,20 @@ export async function inpaintPatch(canvas, mask, region, run, under, iris) {
   sx.fillStyle = '#000';
   sx.fillRect(0, 0, N, N);
   sx.globalCompositeOperation = 'source-over';
-  const rgba = sx.getImageData(0, 0, N, N).data;
+  let rgba = new Uint8Array(sx.getImageData(0, 0, N, N).data.buffer);
 
   const sm = makeCanvas(N, N);
   const mx = sm.getContext('2d', { willReadFrequently: true });
   mx.drawImage(mask, 0, 0, side, side, 0, 0, N, N);
   const md = mx.getImageData(0, 0, N, N).data;
-  const m = new Uint8Array(N * N);
+  let m = new Uint8Array(N * N);
   for (let i = 0; i < m.length; i++) m[i] = md[i * 4 + 3] > 20 || (!under && alpha[i * 4 + 3] < 128) ? 255 : 0;
 
-  const out = await run(new Uint8Array(rgba.buffer), m);
-  sx.putImageData(new ImageData(new Uint8ClampedArray(out), N, N), 0, 0);
+  const flip = FLIPS[variant % FLIPS.length];
+  if (flip) { rgba = flipSquare(rgba, N, 4, flip); m = flipSquare(m, N, 1, flip); }
+  let out = new Uint8Array(await run(rgba, m));
+  if (flip) out = flipSquare(out, N, 4, flip);
+  sx.putImageData(new ImageData(new Uint8ClampedArray(out.buffer), N, N), 0, 0);
 
   // Вклеиваем только закрашенное место, край заплатки размыт, чтобы не было шва.
   let patch = makeCanvas(side, side);
@@ -480,8 +506,11 @@ export async function inpaintPatch(canvas, mask, region, run, under, iris) {
   // большое место: нейронка видела его уменьшенным, возвращаем мелкий рисунок
   const f = side / N;
   if (iris && f > 1.25) {
-    const angle = chooseTurn(canvas, mask, region, iris);
-    if (angle != null) patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, f * 3)));
+    const turns = chooseTurn(canvas, mask, region, iris);
+    if (turns && turns.length) {
+      const angle = turns[variant % turns.length];
+      patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, f * 3)));
+    }
   }
   const px = patch.getContext('2d');
   const soft = makeCanvas(side, side);
@@ -494,11 +523,19 @@ export async function inpaintPatch(canvas, mask, region, run, under, iris) {
   for (let i = 0; i < 4; i++) fx.drawImage(soft, 0, 0);
   px.globalCompositeOperation = 'destination-in';
   px.drawImage(soft, 0, 0);
+  return patch;
+}
+
+export function applyPatch(canvas, patch, region) {
   const cx = canvas.getContext('2d');
   cx.save();
   cx.globalCompositeOperation = 'source-atop'; // прозрачные места слоя остаются прозрачными
   cx.drawImage(patch, region.x, region.y);
   cx.restore();
+}
+
+export async function inpaintPatch(canvas, mask, region, run, under, iris, variant = 0) {
+  applyPatch(canvas, await makePatch(canvas, mask, region, run, under, iris, variant), region);
 }
 
 // --- Листы и раскладки студии -------------------------------------------------

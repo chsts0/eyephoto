@@ -189,9 +189,16 @@ ipcMain.handle('open-file', async (_e, what) => {
 ipcMain.handle('open-path', (_e, file) => (process.env.EYEPHOTO_TEST ? readFile(file) : null));
 
 // Папка с PSD-шаблонами студии: полароид, стикеры, магнит и так далее.
-ipcMain.handle('templates-list', async () => {
+// Шаблоны студии лежат внутри программы: если папку не выбирали, берём их.
+// Своя папка (меню «Файл») важнее, так можно подложить новые шаблоны без обновления.
+const BUILTIN_TEMPLATES = app.isPackaged ? path.join(process.resourcesPath, 'templates') : path.join(__dirname, '..', 'templates');
+async function templatesDir() {
   const { templatesPath } = await loadSettings();
-  if (!templatesPath) return { dir: null, items: [] };
+  return templatesPath || BUILTIN_TEMPLATES;
+}
+
+ipcMain.handle('templates-list', async () => {
+  const templatesPath = await templatesDir();
   try {
     const names = (await fs.readdir(templatesPath)).filter((n) => /\.(psd|psb)$/i.test(n)).sort((a, b) => a.localeCompare(b, 'ru'));
     const items = [];
@@ -199,7 +206,7 @@ ipcMain.handle('templates-list', async () => {
       const st = await fs.stat(path.join(templatesPath, n));
       items.push({ name: n.replace(/\.(psd|psb)$/i, ''), file: n, stamp: `${st.size}-${Math.round(st.mtimeMs)}` });
     }
-    return { dir: templatesPath, items };
+    return { dir: templatesPath === BUILTIN_TEMPLATES ? null : templatesPath, builtin: templatesPath === BUILTIN_TEMPLATES, items };
   } catch {
     return { dir: templatesPath, items: [], missing: true };
   }
@@ -213,8 +220,8 @@ ipcMain.handle('templates-choose', async () => {
 });
 
 ipcMain.handle('templates-read', async (_e, file) => {
-  const { templatesPath } = await loadSettings();
-  if (!templatesPath || path.basename(file) !== file) return null;
+  const templatesPath = await templatesDir();
+  if (path.basename(file) !== file) return null;
   return readFile(path.join(templatesPath, file));
 });
 

@@ -340,3 +340,14 @@ body.no-doc .dock > * { opacity: .35; pointer-events: none; }
 body.bare { grid-template: "center" 1fr / 1fr; padding: 0; }
 body.bare .menubar, body.bare .optbar, body.bare .tools, body.bare .dock, body.bare .status, body.bare .tabs { display: none; }
 body.bare .center { grid-template-rows: 1fr; border-radius: 0; border: 0; }
+.ctxbar.variants { gap: 4px; }
+.ctxbar.variants button.var { width: 50px; height: 50px; padding: 2px; border-radius: 9px; background: none; box-shadow: none; border: 1px solid transparent; display: grid; place-items: center; }
+.ctxbar.variants button.var canvas { width: 44px; height: 44px; border-radius: 7px; display: block; }
+.ctxbar.variants button.var.on { border-color: #f2f2f3; }
+.ctxbar.variants button.var:disabled { cursor: default; }
+.var-wait { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: #f2f2f3; animation: varspin .8s linear infinite; }
+@keyframes varspin { to { transform: rotate(360deg); } }
+.pupil-gear { width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--dim); }
+.pupil-gear:hover, .pupil-gear.on { opacity: 1; background: var(--sel-2); color: inherit; }
+.pupil-gear .ic { width: 15px; height: 15px; }
+.pupil-more { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); display: grid; gap: 4px; }

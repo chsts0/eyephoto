@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld('eyephoto', {
   checkUpdate: () => ipcRenderer.invoke('update-check'),
   installUpdate: () => ipcRenderer.invoke('update-install'),
   openReleases: () => ipcRenderer.invoke('open-releases'),
-  platform: process.platform,
+  platform: process.env.EYEPHOTO_TEST && process.env.EYEPHOTO_PLATFORM || process.platform, // в тестах можно показать вид мака
   setMenu: (menus) => ipcRenderer.send('set-menu', menus),
   onMenuCmd: (cb) => ipcRenderer.on('menu-cmd', (_e, id) => cb(id)),
   onUpdateStatus: on('update-status'),

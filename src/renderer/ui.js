@@ -4,6 +4,12 @@ const $ = (id) => document.getElementById(id);
 
 // Значки нарисованы под сетку 20×20, линия 1.5.
 const ICONS = {
+  'al-l': '<path d="M4 3v14"/><rect x="6.5" y="5" width="9" height="3.5" rx=".8"/><rect x="6.5" y="11.5" width="5.5" height="3.5" rx=".8"/>',
+  'al-ch': '<path d="M10 3v14" stroke-dasharray="1.6 1.4"/><rect x="4" y="5" width="12" height="3.5" rx=".8"/><rect x="6.5" y="11.5" width="7" height="3.5" rx=".8"/>',
+  'al-r': '<path d="M16 3v14"/><rect x="4.5" y="5" width="9" height="3.5" rx=".8"/><rect x="8" y="11.5" width="5.5" height="3.5" rx=".8"/>',
+  'al-t': '<path d="M3 4h14"/><rect x="5" y="6.5" width="3.5" height="9" rx=".8"/><rect x="11.5" y="6.5" width="3.5" height="5.5" rx=".8"/>',
+  'al-cv': '<path d="M3 10h14" stroke-dasharray="1.6 1.4"/><rect x="5" y="4" width="3.5" height="12" rx=".8"/><rect x="11.5" y="6.5" width="3.5" height="7" rx=".8"/>',
+  'al-b': '<path d="M3 16h14"/><rect x="5" y="4.5" width="3.5" height="9" rx=".8"/><rect x="11.5" y="8" width="3.5" height="5.5" rx=".8"/>',
   ellipse: '<ellipse cx="10" cy="10" rx="7.5" ry="5" stroke-dasharray="2.6 2.2"/>',
   rect: '<rect x="3.5" y="4.5" width="13" height="11" stroke-dasharray="2.6 2.2"/>',
   dodge: '<circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="3.2"/>',

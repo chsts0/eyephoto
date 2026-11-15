@@ -1203,7 +1203,8 @@ function prepareTemplate(doc) {
     const cx = a.x + a.w / 2, cy = a.y + a.h / 2;
     const sample = doc.samples.find((s) => cx > s.x - s.w * 0.3 && cx < s.x + s.w * 1.3 && cy > s.y - s.h * 0.3 && cy < s.y + s.h * 1.3);
     const round = a.fill > 0.68 && a.fill < 0.86 && Math.abs(a.w - a.h) < Math.max(a.w, a.h) * 0.08;
-    const kind = sample ? (/парн/.test(sample.name) ? (/цел/.test(sample.name) ? 'whole' : 'corners') : 'single') : round ? 'single' : 'corners';
+    // круглые стикеры по умолчанию с одним глазом, остальное как задумано образцом
+    const kind = round ? 'single' : isSquare(a) ? 'corners' : sample ? (/парн/.test(sample.name) ? (/цел/.test(sample.name) ? 'whole' : 'corners') : 'single') : 'corners';
     doc.slots.push({ area: a, sample, kind, fixed: kind });
   }
   doc.slots.sort((p, q) => p.area.y - q.area.y || p.area.x - q.area.x);
@@ -1223,13 +1224,17 @@ function eyeSources(src) {
 // clip: false — глаза заходят за край места, как в образцах; поверх остаются рамки шаблона.
 // Для мест и режимов без образца работает общий расчёт ниже.
 const STUDIO_LAYOUTS = [
-  { re: /телефон/i, clip: false, corners: [[0.2873, 0.229, 0.872], [0.7102, 0.771, 0.872]], whole: [[0.3791, 0.2576, 0.677], [0.6184, 0.743, 0.677]] },
-  { re: /магнит.*(биг|больш)/i, clip: false, corners: [[0.2874, 0.2282, 0.869], [0.7281, 0.7729, 0.869]], whole: [[0.3859, 0.2601, 0.671], [0.6215, 0.742, 0.671]] },
-  { re: /магнит.*(поменьше|мал|мини)/i, clip: false, corners: [[0.2583, 0.2323, 0.956], [0.7426, 0.7682, 0.956]], whole: [[0.4056, 0.2778, 0.716], [0.5944, 0.7222, 0.716]] },
-  { re: /пол[ая]ро[ий]д/i, clip: true, corners: [[0.2971, 0.1804, 0.843], [0.706, 0.7827, 0.843]] },
-  { re: /шаблон стикер/i, clip: false, corners: [[0.753, 0.2345, 0.71], [0.236, 0.7835, 0.71]] },
-  { re: /кругл/i, clip: true, single: [[0.497, 0.4985, 0.981]] },
+  { re: /телефон/i, corners: [[0.2873, 0.229, 0.872], [0.7102, 0.771, 0.872]], whole: [[0.3791, 0.2576, 0.677], [0.6184, 0.743, 0.677]] },
+  { re: /магнит.*(биг|больш)/i, corners: [[0.2874, 0.2282, 0.869], [0.7281, 0.7729, 0.869]], whole: [[0.3859, 0.2601, 0.671], [0.6215, 0.742, 0.671]] },
+  { re: /магнит.*(поменьше|мал|мини)/i, corners: [[0.2583, 0.2323, 0.956], [0.7426, 0.7682, 0.956]], whole: [[0.4056, 0.2778, 0.716], [0.5944, 0.7222, 0.716]] },
+  { re: /пол[ая]ро[ий]д/i, corners: [[0.2971, 0.1804, 0.843], [0.706, 0.7827, 0.843]] },
+  { re: /кругл/i, single: [[0.497, 0.4985, 0.981]] },
 ];
+// Квадратный стикер: и в своём шаблоне, и на листе А4 глаза стоят одинаково
+const SQUARE_LAYOUT = { corners: [[0.753, 0.2345, 0.71], [0.236, 0.7835, 0.71]] };
+const ROUND_LAYOUT = { single: [[0.497, 0.4985, 0.981]] };
+const isRound = (a) => a.fill > 0.68 && a.fill < 0.86 && Math.abs(a.w - a.h) < Math.max(a.w, a.h) * 0.08;
+const isSquare = (a) => Math.abs(a.w - a.h) < Math.max(a.w, a.h) * 0.04 && a.fill > 0.9;
 const studioLayout = (doc) => STUDIO_LAYOUTS.find((t) => t.re.test(doc.tplName || doc.name || ''));
 
 // Матрёшка: шаблон, открытый из другого шаблона, получает те же глаза.
@@ -1271,8 +1276,10 @@ function fillTemplate(doc, mode = 'auto', name = 'Глаза в шаблон') {
       const base = D.makeLayer({ name: `Место ${si + 1}`, canvas: m.canvas, cx: m.x + m.canvas.width / 2, cy: m.y + m.canvas.height / 2, tplPart: true, locked: true });
       const parts = [base];
       // у каждого места своя копия глаза, чтобы правка одного не меняла другие
-      const lay = studioLayout(doc), own = lay && lay[slot.kind === 'single' || eyes.length < 2 ? 'single' : slot.kind];
-      const clip = own ? lay.clip : true;
+      const want = slot.kind === 'single' || eyes.length < 2 ? 'single' : slot.kind;
+      const lay = isSquare(a) ? SQUARE_LAYOUT : isRound(a) ? ROUND_LAYOUT : studioLayout(doc), own = lay && lay[want];
+      // глаза никогда не выходят за чёрное место: обрезаются по нему, вращать их можно
+      const clip = true;
       const put = (e, cx, cy, size) => parts.push(D.makeLayer({
         name: e.name, kind: 'eye', canvas: im.cloneCanvas(e.canvas), adjust: e.adjust && { ...e.adjust }, eye: e.eye, eyeKey: e.eyeKey,
         cx, cy, scale: size / Math.max(e.canvas.width, e.canvas.height), clip, tplPart: true,
@@ -1320,9 +1327,16 @@ function fillTemplate(doc, mode = 'auto', name = 'Глаза в шаблон') {
 }
 
 // Открыть шаблон, и если в текущем листе есть вырезанные глаза, сразу поставить их.
+const sameEyes = (a, b) => a.length === b.length && a.map((e) => e.eyeKey).sort().join() === b.map((e) => e.eyeKey).sort().join();
+
 async function openTemplate(item) {
   if (S.busy) return;
   const src = S.cur;
+  // Тот же шаблон с теми же глазами уже открыт: переходим в него, а не плодим копии.
+  // Новые глаза: открываем новый.
+  const eyes = src ? templateEyes(src) : [];
+  const open = S.docs.find((d) => d.tplName === item.name && sameEyes(d.tplEyes || [], eyes));
+  if (open) { switchDoc(open); showHome(false); refresh(); return; }
   const file = await api.readTemplate(item.file);
   if (!file) { ui.toast('Шаблон не найден. Проверьте папку шаблонов в меню «Файл»'); return; }
   await setBusy('Открываю шаблон');
@@ -1337,7 +1351,7 @@ async function openTemplate(item) {
     await ui.tell('Не получилось открыть шаблон', 'Файл повреждён или слишком большой.');
     return;
   }
-  doc.tplEyes = src ? templateEyes(src) : [];
+  doc.tplEyes = eyes;
   addDoc(doc);
   setBusy('');
   if (!doc.slots.length) ui.toast('В шаблоне не нашлось чёрных мест под фото');
@@ -2023,6 +2037,7 @@ const TEMP_MOVE = ['marquee', 'lasso', 'patch', 'heal', 'stamp', 'brush', 'erase
 // на маке вместо Ctrl работает Cmd, как в фотошопе
 const MAC = api.platform === 'darwin';
 const MOVE_KEY = MAC ? 'Meta' : 'Control';
+if (MAC) document.body.classList.add('mac');
 const modKey = (e) => (MAC ? e.metaKey : e.ctrlKey);
 const tempMove = (e) => modKey(e) && TEMP_MOVE.includes(S.tool);
 
@@ -2292,16 +2307,47 @@ canvas.addEventListener('wheel', (e) => {
   requestDraw();
 }, { passive: false });
 
+// --- Выравнивание ------------------------------------------------------------
+function layerBox(l) {
+  const c = D.corners(l), xs = c.map((p) => p.x), ys = c.map((p) => p.y);
+  return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+}
+function alignLayers(k) {
+  const d = S.cur;
+  if (!d) return;
+  const act = D.activeLayers(d).filter((l) => !l.locked && D.shown(d, l));
+  if (!act.length) return;
+  let T;
+  if (d.sel) { const b = D.selBounds(d.sel); T = { x0: b.x, x1: b.x + b.w, y0: b.y, y1: b.y + b.h }; }
+  else if (act.length > 1) { const bs = act.map(layerBox); T = { x0: Math.min(...bs.map((b) => b.x0)), x1: Math.max(...bs.map((b) => b.x1)), y0: Math.min(...bs.map((b) => b.y0)), y1: Math.max(...bs.map((b) => b.y1)) }; }
+  else T = { x0: 0, x1: d.w, y0: 0, y1: d.h };
+  D.structEdit(d, 'Выравнивание', () => {
+    for (const l of act) {
+      const b = layerBox(l);
+      if (k === 'l') l.cx += T.x0 - b.x0;
+      if (k === 'r') l.cx += T.x1 - b.x1;
+      if (k === 'ch') l.cx += (T.x0 + T.x1) / 2 - (b.x0 + b.x1) / 2;
+      if (k === 't') l.cy += T.y0 - b.y0;
+      if (k === 'b') l.cy += T.y1 - b.y1;
+      if (k === 'cv') l.cy += (T.y0 + T.y1) / 2 - (b.y0 + b.y1) / 2;
+    }
+  });
+  refresh(); requestDraw();
+}
+
 // --- Строка параметров инструмента ------------------------------------------
 
 function refreshOptions() {
   refreshToolbar();
   const bar = $('optbar'), o = S.opts[S.tool] || {};
+  // кнопки «Проявка», «Поместить», «Сохранить» живут справа в этой строке
+  const right = document.querySelector('.menubar-right');
   bar.textContent = '';
+  bar.appendChild(right);
   if (!S.cur) return;
   const headG = GROUPS.find((g) => g !== '-' && g.some((m) => member(m).tool === S.tool)), head = member(headG ? groupCurrent(headG) : S.tool);
-  bar.appendChild(ui.el('div', 'opt-tool', ui.icon(head.icon) + `<span>${head.label}</span>`));
-  const add = (node) => { const w = ui.el('div', 'opt'); w.appendChild(node); bar.appendChild(w); return node; };
+  bar.insertBefore(ui.el('div', 'opt-tool', ui.icon(head.icon) + `<span>${head.label}</span>`), right);
+  const add = (node) => { const w = ui.el('div', 'opt'); w.appendChild(node); bar.insertBefore(w, right); return node; };
   const range = (label, key, min, max, unit = '', step = 1) => add(ui.slider({
     label, min, max, step, value: o[key], unit, onInput: (v) => { o[key] = v; requestDraw(); },
   }));
@@ -2321,18 +2367,15 @@ function refreshOptions() {
 
   if (S.tool === 'move') {
     check('Выбирать слой щелчком', 'auto');
-    button('По центру листа', () => {
-      const d = S.cur, l = layer();
-      if (!d || !l || l.locked) return;
-      D.structEdit(d, 'По центру листа', () => { l.cx = d.w / 2; l.cy = d.h / 2; });
-      refresh(); requestDraw();
-    });
-    button('Убрать поворот', () => {
-      const d = S.cur, l = layer();
-      if (!d || !l || l.locked || !l.rot) return;
-      D.structEdit(d, 'Убрать поворот', () => { l.rot = 0; });
-      refresh(); requestDraw();
-    });
+    // выравнивание как в фотошопе: к выделению, иначе выбранные слои друг к другу, иначе к листу
+    const al = ui.el('div', 'align');
+    for (const [k, t] of [['l', 'По левому краю'], ['ch', 'По центру по горизонтали'], ['r', 'По правому краю'], ['t', 'По верхнему краю'], ['cv', 'По центру по вертикали'], ['b', 'По нижнему краю']]) {
+      const b = ui.el('button', 'align-btn' + (k === 't' ? ' gap' : ''), ui.icon('al-' + k));
+      b.title = t;
+      b.onclick = () => alignLayers(k);
+      al.appendChild(b);
+    }
+    add(al);
   } else if (S.tool === 'marquee') {
     check('Из центра', 'center');
     add(ui.slider({ label: 'Растушёвка', min: 0, max: 60, value: o.feather, unit: ' px', onInput: (v) => { o.feather = v; if (S.cur && S.cur.sel) S.cur.sel.feather = v; } }));
@@ -2361,7 +2404,7 @@ function refreshOptions() {
       }
       return add(box);
     };
-    seg([['burn', 'Затемнитель'], ['dodge', 'Осветлитель']], 'mode');
+    // затемнитель и осветлитель выбираются в группе инструментов, как в фотошопе
     size(); range('Жёсткость', 'hard', 0, 100, '%');
     // диапазон выпадающим списком, как в фотошопе
     const wrap = ui.el('label', 'opt-select', '<span>Диапазон</span>');

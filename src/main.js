@@ -44,6 +44,10 @@ function createWindow() {
     backgroundColor: '#121315',
     autoHideMenuBar: true,
     title: 'EyePhoto',
+    // на маке без отдельной полосы заголовка: кнопки окна встают в строку инструмента
+    // на маке кнопки окна встают в строку инструмента, на винде строка меню служит заголовком
+    ...(MAC ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 17 } }
+      : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#0b0b0c', symbolColor: '#9b9ba1', height: 32 } }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

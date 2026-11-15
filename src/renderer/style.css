@@ -363,3 +363,25 @@ body.dock-dragging, body.dock-dragging * { cursor: grabbing !important; }
 .dock-grip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; cursor: col-resize; z-index: 5; }
 .dock-grip:hover { background: rgba(255, 255, 255, .08); }
 .dock-drop { position: absolute; left: 6px; right: 6px; height: 2px; border-radius: 1px; background: #f2f2f3; z-index: 6; pointer-events: none; }
+.align { display: flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; }
+.align-btn { width: 28px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--dim); }
+.align-btn:hover { background: var(--sel-2); color: var(--text); }
+.align-btn.gap { margin-left: 8px; }
+.align-btn .ic { width: 17px; height: 17px; }
+/* мак: без полосы меню, кнопки окна в строке инструмента, её можно тянуть как заголовок */
+body.mac { grid-template: "opt opt opt" 38px "tools center dock" 1fr "status status status" 24px / 46px 1fr var(--dock-w, 300px); padding-top: 6px; }
+body.mac .menubar { display: none; }
+body.mac .optbar { padding-left: 84px; -webkit-app-region: drag; }
+body.mac .optbar > * { -webkit-app-region: no-drag; }
+/* строка меню на винде служит заголовком окна: за пустое место окно тянется */
+.menubar { -webkit-app-region: drag; padding-right: 150px !important; }
+.menubar button { -webkit-app-region: no-drag; }
+.optbar .menubar-right { margin-left: auto; display: flex; gap: 6px; flex: none; }
+.optbar .menubar-right .btn { height: 26px; }
+@media (max-width: 1250px) {
+  .optbar { gap: 8px; }
+  .opt .sl-range { width: 46px; }
+  .opt .sl-num { width: 46px; }
+  .optbar .menubar-right .btn { padding: 0 8px; }
+  .optbar .check { gap: 4px; }
+}

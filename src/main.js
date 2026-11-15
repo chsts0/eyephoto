@@ -55,6 +55,7 @@ function createWindow() {
   if (MAC) {
     // на маке без меню программы не работают Cmd+C/V в полях и Cmd+Q
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }]));
+    // настоящие пункты меню присылает окно (setMacMenu), пока оно грузится, стоит запасное
   } else {
     win.removeMenu();
   }
@@ -126,6 +127,31 @@ async function saveSettings(patch) {
 
 ipcMain.handle('settings-get', loadSettings);
 ipcMain.handle('settings-set', (_e, patch) => saveSettings(patch));
+
+// Меню программы на маке: пункты те же, что в окне на винде, но в строке меню сверху.
+// Сочетания клавиш только подписаны (registerAccelerator: false): нажатия ловит само окно,
+// иначе команда срабатывала бы дважды.
+const macKeys = (k) => k && k.replace(/Ctrl\+/g, 'Cmd+').replace(/\bDel\b/, 'Delete').replace(/\bEsc\b/, 'Escape');
+let lastMenu = '';
+ipcMain.on('set-menu', (_e, menus) => {
+  if (!MAC) return;
+  const json = JSON.stringify(menus);
+  if (json === lastMenu) return;
+  lastMenu = json;
+  const item = (it) => (it === '-' ? { type: 'separator' } : {
+    label: it.label, enabled: it.enabled, accelerator: macKeys(it.keys) || undefined, registerAccelerator: false,
+    click: () => win && win.webContents.send('menu-cmd', it.id),
+  });
+  const tpl = [{ role: 'appMenu' }];
+  menus.forEach((m, i) => {
+    const sub = m.items.map(item);
+    // в «Правке» оставляем системные вырезать/копировать/вставить: без них не работают поля ввода
+    if (i === 1) sub.push({ type: 'separator' }, { role: 'cut', label: 'Вырезать' }, { role: 'copy', label: 'Копировать' }, { role: 'paste', label: 'Вставить' }, { role: 'selectAll', label: 'Выделить всё' });
+    tpl.push({ label: m.title, submenu: sub });
+  });
+  tpl.push({ role: 'windowMenu', label: 'Окно' });
+  Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
+});
 
 ipcMain.handle('choose-save-root', async () => {
   const res = await dialog.showOpenDialog(win, {

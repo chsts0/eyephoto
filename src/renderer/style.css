@@ -37,7 +37,7 @@ html, body {
 
 body {
   display: grid;
-  grid-template: "menu menu menu" 32px "opt opt opt" 38px "tools center dock" 1fr "status status status" 24px / 46px 1fr 300px;
+  grid-template: "menu menu menu" 32px "opt opt opt" 38px "tools center dock" 1fr "status status status" 24px / 46px 1fr var(--dock-w, 300px);
   gap: 6px;
   padding: 0 6px 6px;
 }
@@ -76,8 +76,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 
 /* Меню */
 .menubar { grid-area: menu; display: flex; align-items: center; padding: 0 6px 0 8px; }
-.logo { display: flex; align-items: center; gap: 8px; margin-right: 12px; font-weight: 600; letter-spacing: .01em; }
-.logo i { width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle, #0b0b0c 0 30%, #e9e9ea 33% 56%, #7b7b80 59% 100%); box-shadow: 0 0 0 1px rgba(255, 255, 255, .15); }
 .menus { display: flex; height: 26px; gap: 1px; }
 .menu-btn { height: 100%; padding: 0 9px; border: 0; border-radius: 6px; background: none; color: var(--dim); }
 .menu-btn:hover, .menu-btn.on { background: var(--sel); color: var(--text); }
@@ -188,10 +186,10 @@ body.no-doc .tool { color: var(--faint); pointer-events: none; }
 .home-foot .btn { height: 30px; }
 
 /* Правая колонка */
-.dock { grid-area: dock; display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow: hidden; }
+.dock { grid-area: dock; position: relative; display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0; overflow: hidden; }
 body.no-doc .dock > * { opacity: .35; pointer-events: none; }
 .panel { display: flex; flex-direction: column; flex: none; }
-.panel.grow { flex: 1; min-height: 0; }
+.panel.grow { flex: 1; min-height: 150px; }
 .panel > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 30px; padding: 0 12px; border-bottom: 1px solid var(--line); }
 .panel h3 { margin: 0; font-size: 12px; font-weight: 600; color: #dcdcde; }
 .panel-body { padding: 10px 12px 12px; }
@@ -351,3 +349,17 @@ body.bare .center { grid-template-rows: 1fr; border-radius: 0; border: 0; }
 .pupil-gear:hover, .pupil-gear.on { opacity: 1; background: var(--sel-2); color: inherit; }
 .pupil-gear .ic { width: 15px; height: 15px; }
 .pupil-more { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+.tool.group { position: relative; }
+.tool.group::after { content: ''; position: absolute; right: 3px; bottom: 3px; border: 3px solid transparent; border-right-color: currentColor; border-bottom-color: currentColor; opacity: .55; }
+.tool-fly { min-width: 230px; }
+.tool-fly .menu-item.on { background: var(--sel); }
+.fly-name { display: flex; align-items: center; gap: 10px; }
+.fly-name .ic { width: 16px; height: 16px; }
+.panel.collapsed > :not(header) { display: none !important; }
+.panel.collapsed > header { border-bottom: 0; }
+.panel.grow.collapsed { flex: none; min-height: 0; }
+.panel.dragging { opacity: .45; }
+body.dock-dragging, body.dock-dragging * { cursor: grabbing !important; }
+.dock-grip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; cursor: col-resize; z-index: 5; }
+.dock-grip:hover { background: rgba(255, 255, 255, .08); }
+.dock-drop { position: absolute; left: 6px; right: 6px; height: 2px; border-radius: 1px; background: #f2f2f3; z-index: 6; pointer-events: none; }

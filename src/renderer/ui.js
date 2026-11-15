@@ -4,6 +4,9 @@ const $ = (id) => document.getElementById(id);
 
 // Значки нарисованы под сетку 20×20, линия 1.5.
 const ICONS = {
+  ellipse: '<ellipse cx="10" cy="10" rx="7.5" ry="5" stroke-dasharray="2.6 2.2"/>',
+  rect: '<rect x="3.5" y="4.5" width="13" height="11" stroke-dasharray="2.6 2.2"/>',
+  dodge: '<circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="3.2"/>',
   gear: '<circle cx="10" cy="10" r="2.4"/><path d="M10 2.8v2.1M10 15.1v2.1M2.8 10h2.1M15.1 10h2.1M4.9 4.9l1.5 1.5M13.6 13.6l1.5 1.5M4.9 15.1l1.5-1.5M13.6 6.4l1.5-1.5"/>',
   move: '<path d="M5 3.5l9.5 5.6-4 1.2 2.3 4.6-1.8.9-2.3-4.6-3 2.9z"/>',
   marquee: '<ellipse cx="10" cy="10" rx="6.5" ry="6.5" stroke-dasharray="2.6 2.2"/>',

@@ -1,6 +1,7 @@
 import * as im from './imaging.js';
 import * as D from './doc.js';
 import * as ui from './ui.js';
+import { initDock } from './dock.js';
 
 const api = window.eyephoto;
 const $ = (id) => document.getElementById(id);
@@ -21,7 +22,7 @@ const S = {
   pupilSoft: 100,     // мягкость края зрачка после сужения, % от студийной
   opts: {
     move: { auto: true },
-    marquee: { center: true, circle: true, feather: 8 },
+    marquee: { center: true, shape: 'circle', feather: 8 },
     lasso: { feather: 0 },
     patch: { size: 60 },
     stamp: { size: 80, hard: 50, flow: 100, aligned: true },
@@ -285,7 +286,9 @@ function drawSelectionEdge(d, dpr) {
     const er = im.makeCanvas(W, H), e = er.getContext('2d');
     e.drawImage(mask, 0, 0);
     e.globalCompositeOperation = 'destination-in';
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) e.drawImage(mask, dx, dy);
+    // толщина края в точках экрана, а не в пикселях: на ретине иначе линия вдвое тоньше
+    const k = Math.max(1, Math.round(dpr));
+    for (let i = 1; i <= k; i++) for (const [dx, dy] of [[i, 0], [-i, 0], [0, i], [0, -i]]) e.drawImage(mask, dx, dy);
     const edge = mask;
     m.setTransform(1, 0, 0, 1, 0, 0);
     m.globalCompositeOperation = 'destination-out';
@@ -296,7 +299,8 @@ function drawSelectionEdge(d, dpr) {
   const a = selCache.ants, ax = a.getContext('2d');
   ax.globalCompositeOperation = 'copy';
   ax.fillStyle = ax.createPattern(antsTile, 'repeat');
-  ax.save(); ax.translate(S.ants, 0); ax.fillRect(-8, 0, W + 8, H); ax.restore();
+  const k = Math.max(1, Math.round(dpr));
+  ax.save(); ax.scale(k, k); ax.translate(S.ants, 0); ax.fillRect(-8, 0, W / k + 8, H / k); ax.restore();
   ax.globalCompositeOperation = 'destination-in';
   ax.drawImage(selCache.edge, 0, 0);
   octx.save();
@@ -440,7 +444,7 @@ function psdToDoc(name, bytes, lock) {
   doc.slots = [];
   doc.samples = [];
   doc.template = !!lock;
-  if (meta) { doc.eyeSeq = meta.eyeSeq || 0; doc.eyes = meta.eyes || 0; }
+  if (meta) { doc.eyeSeq = meta.eyeSeq || 0; doc.eyes = meta.eyes || 0; if (meta.tplName) doc.tplName = meta.tplName; if (meta.tplEyeKeys) doc.tplEyeKeys = meta.tplEyeKeys; }
   const walk = (nodes, hidden, opacity) => {
     for (const n of nodes || []) {
       const hid = hidden || !!n.hidden, op = opacity * (n.opacity == null ? 1 : n.opacity);
@@ -464,7 +468,7 @@ function psdToDoc(name, bytes, lock) {
         visible: !hid, opacity: op, clip: !!n.clipping,
         blend: BLENDS.includes(blend) ? blend : 'source-over',
         locked: lock ? true : !!(mine && mine.locked), // замок снимается щелчком
-        kind: (mine && mine.kind) || 'pixel', eye: (mine && mine.eye) || 0, eyeKey: (mine && mine.eyeKey) || '',
+        kind: (mine && mine.kind) || 'pixel', eye: (mine && mine.eye) || 0, eyeKey: (mine && mine.eyeKey) || '', tplPart: !!(mine && mine.tplPart),
       }));
     }
   };
@@ -995,7 +999,8 @@ function buildPsd(d) {
     });
     const meta = {
       eyeSeq: d.eyeSeq || 0, eyes: d.eyes || 0,
-      layers: d.layers.map((l) => ({ kind: l.kind, eye: l.eye, eyeKey: l.eyeKey, locked: l.locked })),
+      tplName: d.tplName || '', tplEyeKeys: (d.tplEyes || []).map((e) => e.eyeKey),
+      layers: d.layers.map((l) => ({ kind: l.kind, eye: l.eye, eyeKey: l.eyeKey, locked: l.locked, tplPart: !!l.tplPart })),
     };
     const res = { horizontalResolution: d.dpi, horizontalResolutionUnit: 'PPI', widthUnit: 'Inches', verticalResolution: d.dpi, verticalResolutionUnit: 'PPI', heightUnit: 'Inches' };
     return new Uint8Array(window.agPsd.writePsd({
@@ -1206,9 +1211,47 @@ function prepareTemplate(doc) {
 
 // Глаза для шаблона: копии вырезанных глаз из листа, откуда открыли шаблон.
 function eyeSources(src) {
+  const seen = new Set();
   return eyesOf(src).filter((l) => !l.tplPart)
     .sort((a, b) => (Math.abs(a.cx - b.cx) > 1 ? a.cx - b.cx : a.eye - b.eye))
+    .filter((l) => !l.eyeKey || (!seen.has(l.eyeKey) && seen.add(l.eyeKey)))
     .map((l) => ({ canvas: im.cloneCanvas(l.canvas), adjust: l.adjust && { ...l.adjust }, name: l.name, eye: l.eye, eyeKey: l.eyeKey }));
+}
+
+// Раскладки студии, снятые с готовых работ: где стоит центр каждого глаза
+// (доля ширины и высоты чёрного места) и какого он размера (доля меньшей стороны места).
+// clip: false — глаза заходят за край места, как в образцах; поверх остаются рамки шаблона.
+// Для мест и режимов без образца работает общий расчёт ниже.
+const STUDIO_LAYOUTS = [
+  { re: /телефон/i, clip: false, corners: [[0.2873, 0.229, 0.872], [0.7102, 0.771, 0.872]], whole: [[0.3791, 0.2576, 0.677], [0.6184, 0.743, 0.677]] },
+  { re: /магнит.*(биг|больш)/i, clip: false, corners: [[0.2874, 0.2282, 0.869], [0.7281, 0.7729, 0.869]], whole: [[0.3859, 0.2601, 0.671], [0.6215, 0.742, 0.671]] },
+  { re: /магнит.*(поменьше|мал|мини)/i, clip: false, corners: [[0.2583, 0.2323, 0.956], [0.7426, 0.7682, 0.956]], whole: [[0.4056, 0.2778, 0.716], [0.5944, 0.7222, 0.716]] },
+  { re: /пол[ая]ро[ий]д/i, clip: true, corners: [[0.2971, 0.1804, 0.843], [0.706, 0.7827, 0.843]] },
+  { re: /шаблон стикер/i, clip: false, corners: [[0.753, 0.2345, 0.71], [0.236, 0.7835, 0.71]] },
+  { re: /кругл/i, clip: true, single: [[0.497, 0.4985, 0.981]] },
+];
+const studioLayout = (doc) => STUDIO_LAYOUTS.find((t) => t.re.test(doc.tplName || doc.name || ''));
+
+// Матрёшка: шаблон, открытый из другого шаблона, получает те же глаза.
+// Свои вырезанные глаза листа важнее; если их нет, берём глаза, которые уже
+// стояли в шаблоне (после открытия PSD с диска это просто его слои глаз).
+const cloneEye = (e) => ({ ...e, canvas: im.cloneCanvas(e.canvas), adjust: e.adjust && { ...e.adjust } });
+function templateEyes(src) {
+  const own = eyeSources(src);
+  if (own.length) return own;
+  if (src.tplEyes && src.tplEyes.length) return src.tplEyes.map(cloneEye);
+  const seen = new Set(), out = [];
+  const placed = eyesOf(src).filter((l) => l.tplPart).sort((a, b) => a.cy - b.cy || a.cx - b.cx);
+  for (const l of placed) {
+    const key = l.eyeKey || l.eye || l.name;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ canvas: im.cloneCanvas(l.canvas), adjust: l.adjust && { ...l.adjust }, name: l.name, eye: l.eye, eyeKey: l.eyeKey });
+  }
+  // порядок как был в шаблоне до сохранения, чтобы глаза не менялись местами
+  const keys = src.tplEyeKeys || [];
+  out.sort((p, q) => (keys.indexOf(p.eyeKey) + 1 || 99) - (keys.indexOf(q.eyeKey) + 1 || 99));
+  return out.slice(0, 2);
 }
 
 // Расставляет глаза по всем местам шаблона. mode: 'auto' — как задумано в шаблоне,
@@ -1228,11 +1271,28 @@ function fillTemplate(doc, mode = 'auto', name = 'Глаза в шаблон') {
       const base = D.makeLayer({ name: `Место ${si + 1}`, canvas: m.canvas, cx: m.x + m.canvas.width / 2, cy: m.y + m.canvas.height / 2, tplPart: true, locked: true });
       const parts = [base];
       // у каждого места своя копия глаза, чтобы правка одного не меняла другие
+      const lay = studioLayout(doc), own = lay && lay[slot.kind === 'single' || eyes.length < 2 ? 'single' : slot.kind];
+      const clip = own ? lay.clip : true;
       const put = (e, cx, cy, size) => parts.push(D.makeLayer({
         name: e.name, kind: 'eye', canvas: im.cloneCanvas(e.canvas), adjust: e.adjust && { ...e.adjust }, eye: e.eye, eyeKey: e.eyeKey,
-        cx, cy, scale: size / Math.max(e.canvas.width, e.canvas.height), clip: true, tplPart: true,
+        cx, cy, scale: size / Math.max(e.canvas.width, e.canvas.height), clip, tplPart: true,
       }));
-      if (slot.kind === 'single' || eyes.length < 2) {
+      // место из образца студии: ставим ровно как на готовых работах
+      const atQ = (q) => ({ x: a.x + q[0] * a.w, y: a.y + q[1] * a.h, d: q[2] * Math.min(a.w, a.h) });
+      if (own && own.length === 1) {
+        const q = atQ(own[0]);
+        put(eyes[next++ % eyes.length], q.x, q.y, q.d);
+      } else if (own && eyes.length >= 2) {
+        // какой глаз куда: как в общем расчёте (левый глаз листа в левое верхнее место),
+        // берём ближайшее место образца
+        const tall = box.h > box.w, W = tall ? box.h : box.w, H = tall ? box.w : box.h;
+        const pos = im.pairSlots(W, H, slot.kind).map((p) => ({ x: box.x + (tall ? p.cy : p.cx), y: box.y + (tall ? W - p.cx : p.cy) }));
+        const qs = own.map(atQ);
+        const straight = Math.hypot(pos[0].x - qs[0].x, pos[0].y - qs[0].y) + Math.hypot(pos[1].x - qs[1].x, pos[1].y - qs[1].y);
+        const crossed = Math.hypot(pos[0].x - qs[1].x, pos[0].y - qs[1].y) + Math.hypot(pos[1].x - qs[0].x, pos[1].y - qs[0].y);
+        const order = crossed < straight ? [qs[1], qs[0]] : qs;
+        order.forEach((q, i) => put(eyes[i], q.x, q.y, q.d));
+      } else if (slot.kind === 'single' || eyes.length < 2) {
         const e = eyes[next++ % eyes.length];
         const size = slot.sample ? Math.max(box.w, box.h) : Math.min(box.w, box.h);
         put(e, box.x + box.w / 2, box.y + box.h / 2, size);
@@ -1269,6 +1329,7 @@ async function openTemplate(item) {
   let doc;
   try {
     ({ doc } = psdToDoc(file.name.replace(PSD_RE, ''), file.data, true));
+    doc.tplName = file.name.replace(PSD_RE, '');
     prepareTemplate(doc);
   } catch (e) {
     console.error(e);
@@ -1276,7 +1337,7 @@ async function openTemplate(item) {
     await ui.tell('Не получилось открыть шаблон', 'Файл повреждён или слишком большой.');
     return;
   }
-  doc.tplEyes = src ? eyeSources(src) : [];
+  doc.tplEyes = src ? templateEyes(src) : [];
   addDoc(doc);
   setBusy('');
   if (!doc.slots.length) ui.toast('В шаблоне не нашлось чёрных мест под фото');
@@ -1295,7 +1356,7 @@ const TPL_GROUPS = [
 const TPL_NAMES = [
   [/кругл.*стикер|стикер.*кругл/i, 'Круглые'],
   [/шаблон стикер/i, 'Квадратные'],
-  [/стикер.*а4|а4.*стикер/i, 'Лист А4'],
+  [/стикер.*а4|а4.*стикер/i, 'А4'],
   [/магнит.*(биг|больш)/i, 'Большой'],
   [/магнит.*(поменьше|маленьк|мини)/i, 'Малый'],
   [/пол[ая]ро[ий]д/i, 'Полароид'],
@@ -1468,32 +1529,105 @@ async function exportAs() {
 // --- Инструменты ------------------------------------------------------------
 
 const TOOLS = [
-  ['move', 'Перемещение', 'V', 'Щелчок выбирает слой, мимо снимает выбор. Углы рамки: размер, снаружи от угла: поворот. Alt: тащить копию'],
-  ['marquee', 'Овальная область', 'M', 'Тяните от центра радужки. Круг потом двигается за середину и меняется за край. Ctrl+J: вырезать на новый слой'],
-  ['lasso', 'Лассо', 'L', 'Добавить к выделенной области: обводки сливаются в одно пятно. Alt: вычесть, щелчок: снять выделение'],
-  '-',
-  ['heal', 'Восстанавливающая кисть', 'J', 'Alt+щелчок: откуда брать. Рисуйте по дефекту, при отпускании текстура подстроится под цвет вокруг'],
-  ['patch', 'Заплатка нейронкой', 'Shift+J', 'Закрасьте лишнее. Нейронка уберёт, когда отпустите мышку'],
-  ['stamp', 'Штамп', 'S', 'Alt+щелчок: откуда брать. Потом рисуйте там, куда переносить'],
-  ['brush', 'Кисть', 'B', 'Рисует выбранным цветом на активном слое'],
-  ['eraser', 'Ластик', 'E', 'Стирает пиксели активного слоя до прозрачности'],
-  ['burn', 'Затемнитель', 'O', 'Темнит только тона из выбранного диапазона. С Alt осветляет'],
-  ['pupil', 'Зрачок', 'P', 'Подведите круг к краю зрачка ползунком справа или мышкой за край. Потом «Сузить зрачок» или Enter'],
-  '-',
-  ['hand', 'Рука', 'H', 'Двигает картинку. То же самое делает пробел с любым инструментом'],
-  ['zoom', 'Масштаб', 'Z', 'Щелчок приближает, Alt+щелчок отдаляет. Колесо работает всегда'],
+  ['move', 'Перемещение', 'V'],
+  ['marquee', 'Выделение', 'M'],
+  ['lasso', 'Лассо', 'L'],
+  ['heal', 'Восстанавливающая кисть', 'J'],
+  ['patch', 'Заплатка нейронкой', 'J'],
+  ['stamp', 'Штамп', 'S'],
+  ['brush', 'Кисть', 'B'],
+  ['eraser', 'Ластик', 'E'],
+  ['burn', 'Затемнитель', 'O'],
+  ['pupil', 'Зрачок', 'P'],
+  ['hand', 'Рука', 'H'],
+  ['zoom', 'Масштаб', 'Z'],
 ];
-const toolInfo = (id) => TOOLS.find((t) => t !== '-' && t[0] === id);
+const toolInfo = (id) => TOOLS.find((t) => t[0] === id);
 
-for (const t of TOOLS) {
-  if (t === '-') { $('tools').appendChild(ui.el('div', 'tool-sep')); continue; }
-  const b = ui.el('button', 'tool', ui.icon(t[0]));
-  b.dataset.tool = t[0];
-  b.title = `${t[1]} (${t[2]})`;
-  b.onclick = () => setTool(t[0]);
-  if (t[0] === 'hand') b.ondblclick = () => fit();
-  if (t[0] === 'zoom') b.ondblclick = () => zoomAt(...center(), 1, 1);
+// Группы как в фотошопе: на панели виден один инструмент группы, у кнопки
+// в углу стрелочка. Shift+буква листает группу, правый щелчок или долгое
+// нажатие открывает список. Варианты одного инструмента («marquee:rect»)
+// это тот же инструмент с другой настройкой.
+const MEMBERS = {
+  'marquee:circle': { tool: 'marquee', label: 'Круглая область', icon: 'marquee', set: { shape: 'circle' } },
+  'marquee:ellipse': { tool: 'marquee', label: 'Овальная область', icon: 'ellipse', set: { shape: 'ellipse' } },
+  'marquee:rect': { tool: 'marquee', label: 'Прямоугольная область', icon: 'rect', set: { shape: 'rect' } },
+  'burn:burn': { tool: 'burn', label: 'Затемнитель', icon: 'burn', set: { mode: 'burn' } },
+  'burn:dodge': { tool: 'burn', label: 'Осветлитель', icon: 'dodge', set: { mode: 'dodge' } },
+};
+const member = (m) => MEMBERS[m] || { tool: m, label: toolInfo(m)[1], icon: m };
+const GROUPS = [
+  ['move'], ['marquee:circle', 'marquee:ellipse', 'marquee:rect'], ['lasso'], '-',
+  ['heal', 'patch'], ['stamp'], ['brush'], ['eraser'], ['burn:burn', 'burn:dodge'], ['pupil'], '-',
+  ['hand'], ['zoom'],
+];
+const groupKey = (g) => toolInfo(member(g[0]).tool)[2];
+const lastInGroup = new Map();
+// какой инструмент группы сейчас «наверху»: выбранный, иначе последний выбранный
+function groupCurrent(g) {
+  const on = g.find((m) => { const x = member(m); return x.tool === S.tool && (!x.set || Object.entries(x.set).every(([k, v]) => S.opts[x.tool][k] === v)); });
+  if (on) return on;
+  const t = g.find((m) => member(m).tool === S.tool);
+  return t || lastInGroup.get(g) || g[0];
+}
+function pickMember(g, m) {
+  const x = member(m);
+  if (x.set) Object.assign(S.opts[x.tool], x.set);
+  lastInGroup.set(g, m);
+  if (S.tool === x.tool) { refreshOptions(); setCursor(); } else setTool(x.tool);
+  refreshToolbar();
+}
+const memberLabel = () => { const g = GROUPS.find((q) => q !== '-' && q.some((m) => member(m).tool === S.tool)); return g ? member(groupCurrent(g)).label : toolInfo(S.tool)[1]; };
+
+let flyout = null;
+function closeFlyout() { if (flyout) { flyout.remove(); flyout = null; } }
+function openFlyout(btn, g) {
+  closeFlyout();
+  flyout = ui.el('div', 'menu-pop tool-fly');
+  for (const m of g) {
+    const x = member(m), it = ui.el('button', 'menu-item' + (groupCurrent(g) === m ? ' on' : ''));
+    it.append(ui.el('span', 'fly-name', ui.icon(x.icon) + `<span>${x.label}</span>`), ui.el('kbd', '', groupKey(g)));
+    it.onclick = () => { closeFlyout(); pickMember(g, m); };
+    flyout.appendChild(it);
+  }
+  const r = btn.getBoundingClientRect();
+  flyout.style.left = r.right + 6 + 'px'; flyout.style.top = r.top + 'px';
+  document.body.appendChild(flyout);
+}
+window.addEventListener('pointerdown', (e) => { if (flyout && !flyout.contains(e.target)) closeFlyout(); }, true);
+
+const toolBtns = [];
+for (const g of GROUPS) {
+  if (g === '-') { $('tools').appendChild(ui.el('div', 'tool-sep')); continue; }
+  const b = ui.el('button', 'tool' + (g.length > 1 ? ' group' : ''));
+  b.onclick = () => pickMember(g, groupCurrent(g));
+  if (g.length > 1) {
+    b.oncontextmenu = (e) => { e.preventDefault(); openFlyout(b, g); };
+    let hold = 0;
+    b.onpointerdown = () => { hold = setTimeout(() => openFlyout(b, g), 350); };
+    b.onpointerup = b.onpointerleave = () => clearTimeout(hold);
+  }
+  if (g[0] === 'hand') b.ondblclick = () => fit();
+  if (g[0] === 'zoom') b.ondblclick = () => zoomAt(...center(), 1, 1);
+  toolBtns.push([b, g]);
   $('tools').appendChild(b);
+}
+function refreshToolbar() {
+  for (const [b, g] of toolBtns) {
+    const m = groupCurrent(g), x = member(m);
+    b.innerHTML = ui.icon(x.icon);
+    b.dataset.tool = x.tool;
+    b.title = `${x.label} (${g.length > 1 ? 'Shift+' : ''}${groupKey(g)})`;
+    b.classList.toggle('on', g.some((q) => member(q).tool === S.tool) && (!x.set || m === groupCurrent(g)) && x.tool === S.tool);
+  }
+}
+// буква группы: выбрать её инструмент; Shift+буква: следующий в группе
+function toolKey(k) {
+  const shift = k.startsWith('Shift+'), key = shift ? k.slice(6) : k;
+  const g = GROUPS.find((q) => q !== '-' && groupKey(q) === key);
+  if (!g) return null;
+  const cur = groupCurrent(g), inGroup = g.some((m) => member(m).tool === S.tool);
+  return shift && g.length > 1 && inGroup ? [g, g[(g.indexOf(cur) + 1) % g.length]] : [g, cur];
 }
 
 // Круг ставится по центру глаза, как в панели студии для фотошопа. Если зрачок
@@ -1979,7 +2113,7 @@ canvas.addEventListener('pointerdown', (e) => {
     else if (h === 'in') S.drag = { type: 'selmove', commit: D.beginStruct(d), s: one, dx: p.x - one.cx, dy: p.y - one.cy };
     else {
       const start = o.center ? snapToCenter(p) : p;
-      S.drag = { type: 'marquee', commit: D.beginStruct(d), start, add: e.shiftKey, shape: { type: 'ellipse', cx: start.x, cy: start.y, rx: 0, ry: 0 } };
+      S.drag = { type: 'marquee', commit: D.beginStruct(d), start, add: e.shiftKey, shape: { type: o.shape === 'rect' ? 'rect' : 'ellipse', cx: start.x, cy: start.y, rx: 0, ry: 0 } };
     }
   } else if (S.tool === 'lasso') {
     // как просили в студии: новая обводка добавляется к старой, Alt вычитает, щелчок снимает выделение
@@ -2065,7 +2199,8 @@ canvas.addEventListener('pointermove', (e) => {
   } else if (g.type === 'marquee') {
     if (S.space) { g.start.x += e.movementX / d.view.scale; g.start.y += e.movementY / d.view.scale; }
     const o = S.opts.marquee, s = g.shape, dx = p.x - g.start.x, dy = p.y - g.start.y;
-    const round = o.circle !== e.shiftKey && !g.add ? true : o.circle;
+    // круг всегда ровный; овал и прямоугольник с Shift тоже ровные (кроме Shift для добавления)
+    const round = o.shape === 'circle' || (e.shiftKey && !g.add);
     if (o.center) {
       s.cx = g.start.x; s.cy = g.start.y;
       s.rx = round ? Math.hypot(dx, dy) : Math.abs(dx);
@@ -2113,14 +2248,14 @@ function endDrag(e) {
   if (g.type === 'marquee' || g.type === 'lasso') {
     const s = g.shape;
     // щелчок с дрожью руки не считаем обводкой: смотрим размер на экране
-    const spanPx = s.type === 'ellipse' ? Math.min(s.rx, s.ry) * 2 * d.view.scale
+    const spanPx = s.type !== 'poly' ? Math.min(s.rx, s.ry) * 2 * d.view.scale
       : Math.max(Math.max(...s.pts.map((q) => q.x)) - Math.min(...s.pts.map((q) => q.x)), Math.max(...s.pts.map((q) => q.y)) - Math.min(...s.pts.map((q) => q.y))) * d.view.scale;
-    const ok = (s.type === 'ellipse' ? s.rx > 2 && s.ry > 2 : s.pts.length > 2) && spanPx > 5;
+    const ok = (s.type !== 'poly' ? s.rx > 2 && s.ry > 2 : s.pts.length > 2) && spanPx > 5;
     const had = !!d.sel;
     if (!ok) { if (g.type === 'lasso' ? !s.sub : !g.add && !s.sub) d.sel = null; }
     else if ((g.add || s.sub) && d.sel) d.sel.shapes.push(s);
     else if (!s.sub) d.sel = { shapes: [s], feather: S.opts[S.tool].feather };
-    if (ok) g.commit(g.type === 'marquee' ? 'Овальная область' : 'Лассо');
+    if (ok) g.commit(g.type === 'marquee' ? { rect: 'Прямоугольная область', ellipse: s.rx === s.ry ? 'Круглая область' : 'Овальная область' }[s.type] : 'Лассо');
     else if (had && !d.sel) g.commit('Снять выделение');
     refresh();
   }
@@ -2160,11 +2295,12 @@ canvas.addEventListener('wheel', (e) => {
 // --- Строка параметров инструмента ------------------------------------------
 
 function refreshOptions() {
-  document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('on', b.dataset.tool === S.tool));
-  const bar = $('optbar'), info = toolInfo(S.tool), o = S.opts[S.tool] || {};
+  refreshToolbar();
+  const bar = $('optbar'), o = S.opts[S.tool] || {};
   bar.textContent = '';
   if (!S.cur) return;
-  bar.appendChild(ui.el('div', 'opt-tool', ui.icon(S.tool) + `<span>${info[1]}</span>`));
+  const headG = GROUPS.find((g) => g !== '-' && g.some((m) => member(m).tool === S.tool)), head = member(headG ? groupCurrent(headG) : S.tool);
+  bar.appendChild(ui.el('div', 'opt-tool', ui.icon(head.icon) + `<span>${head.label}</span>`));
   const add = (node) => { const w = ui.el('div', 'opt'); w.appendChild(node); bar.appendChild(w); return node; };
   const range = (label, key, min, max, unit = '', step = 1) => add(ui.slider({
     label, min, max, step, value: o[key], unit, onInput: (v) => { o[key] = v; requestDraw(); },
@@ -2199,7 +2335,6 @@ function refreshOptions() {
     });
   } else if (S.tool === 'marquee') {
     check('Из центра', 'center');
-    check('Ровный круг', 'circle');
     add(ui.slider({ label: 'Растушёвка', min: 0, max: 60, value: o.feather, unit: ' px', onInput: (v) => { o.feather = v; if (S.cur && S.cur.sel) S.cur.sel.feather = v; } }));
   } else if (S.tool === 'lasso') {
     add(ui.slider({ label: 'Растушёвка', min: 0, max: 60, value: o.feather, unit: ' px', onInput: (v) => { o.feather = v; if (S.cur && S.cur.sel) S.cur.sel.feather = v; } }));
@@ -2662,6 +2797,7 @@ function refresh() {
   refreshStatus();
   refreshActions();
   refreshCtx();
+  syncMacMenu();
   const d = S.cur;
   $('saveBtn').disabled = $('placeBtn').disabled = false;
   $('saveBtn').disabled = !d;
@@ -2767,23 +2903,42 @@ const CMD = {
   actual: { label: 'Реальный размер, 100%', keys: 'Ctrl+1', run: () => zoomAt(...center(), 1, 1), enabled: has },
   zoomIn: { label: 'Приблизить', keys: 'Ctrl+=', run: () => zoomAt(...center(), 1.25), enabled: has },
   zoomOut: { label: 'Отдалить', keys: 'Ctrl+-', run: () => zoomAt(...center(), 1 / 1.25), enabled: has },
+  resetPanels: { label: 'Вернуть панели по умолчанию', run: () => dockUi.reset() },
 };
 
-ui.menubar($('menus'), [
+const dockUi = initDock({ dock: document.querySelector('.dock'), load: () => null, save: (dock) => api.setSettings({ dock }) });
+
+const MENUS = [
   { title: 'Файл', items: ['new', 'open', 'place', '-', 'save', 'savePsd', 'export', '-', 'tplFolder', 'saveFolder', 'pointPrefix', '-', 'close'] },
   { title: 'Правка', items: ['undo', 'redo', '-', 'transform', 'clear'] },
   { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerMerge', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
   { title: 'Фильтр', items: ['develop', 'neural'] },
-  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides'] },
-], CMD);
+  { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides', '-', 'resetPanels'] },
+];
+// На маке меню живёт в системной строке сверху экрана, как у всех программ.
+if (MAC) {
+  $('menus').hidden = true;
+  api.onMenuCmd((id) => run(id));
+} else {
+  ui.menubar($('menus'), MENUS, CMD);
+}
+let menuTimer = 0;
+function syncMacMenu() {
+  if (!MAC) return;
+  clearTimeout(menuTimer);
+  menuTimer = setTimeout(() => api.setMenu(MENUS.map((m) => ({
+    title: m.title,
+    items: m.items.map((id) => (id === '-' ? '-' : { id, label: CMD[id].label, keys: CMD[id].keys || '', enabled: !S.busy && (!CMD[id].enabled || !!CMD[id].enabled()) })),
+  }))), 120);
+}
 
 const run = (id) => { const c = CMD[id]; if (!S.busy && (!c.enabled || c.enabled())) c.run(); };
 $('placeBtn').onclick = () => run('place');
 $('saveBtn').onclick = () => run('save');
 $('developBtn').onclick = () => run('develop');
 
-const TOOL_KEYS = Object.fromEntries(TOOLS.filter((t) => t !== '-').map((t) => [t[2], t[0]]));
+
 const BY_KEYS = Object.fromEntries(Object.entries(CMD).filter(([, c]) => c.keys).map(([id, c]) => [c.keys, id]));
 
 window.addEventListener('keydown', (e) => {
@@ -2815,9 +2970,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (k === 'Enter' && S.tool === 'pupil') { applyPupil(); return; }
-  if (TOOL_KEYS[k]) {
+  const tk = toolKey(k);
+  if (tk) {
     // Удержание клавиши инструмента включает его на время, отпустил и вернулся к прежнему
-    if (!e.repeat) { S.spring = { key: e.code, prev: S.tool, at: Date.now() }; setTool(TOOL_KEYS[k]); }
+    if (!e.repeat) { S.spring = { key: e.code, prev: S.tool, at: Date.now() }; pickMember(tk[0], tk[1]); }
     return;
   }
   // Цифры как в фотошопе: у перемещения непрозрачность слоя, у кистей нажим. 1 = 10%, 0 = 100%
@@ -2910,6 +3066,7 @@ loadTemplateList();
 
 api.settings().then((s) => {
   if (s.guides === false) S.guides = false;
+  if (s.dock) dockUi.restore(s.dock);
   if (typeof s.eyeFeather === 'number') { S.opts.marquee.feather = s.eyeFeather; pupilUi.feather.set(s.eyeFeather); }
   if (typeof s.pupilSoft === 'number') { S.pupilSoft = s.pupilSoft; pupilUi.soft.set(s.pupilSoft); }
 });

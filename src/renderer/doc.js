@@ -339,6 +339,8 @@ export function shapePath(ctx, s) {
   if (s.type === 'ellipse') {
     ctx.moveTo(s.cx + s.rx, s.cy);
     ctx.ellipse(s.cx, s.cy, s.rx, s.ry, 0, 0, Math.PI * 2);
+  } else if (s.type === 'rect') {
+    ctx.rect(s.cx - s.rx, s.cy - s.ry, s.rx * 2, s.ry * 2);
   } else {
     s.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   }
@@ -349,8 +351,8 @@ export function selBounds(sel) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const s of sel.shapes) {
     if (s.sub) continue;
-    const xs = s.type === 'ellipse' ? [s.cx - s.rx, s.cx + s.rx] : s.pts.map((p) => p.x);
-    const ys = s.type === 'ellipse' ? [s.cy - s.ry, s.cy + s.ry] : s.pts.map((p) => p.y);
+    const xs = s.type !== 'poly' ? [s.cx - s.rx, s.cx + s.rx] : s.pts.map((p) => p.x);
+    const ys = s.type !== 'poly' ? [s.cy - s.ry, s.cy + s.ry] : s.pts.map((p) => p.y);
     x0 = Math.min(x0, ...xs); x1 = Math.max(x1, ...xs);
     y0 = Math.min(y0, ...ys); y1 = Math.max(y1, ...ys);
   }

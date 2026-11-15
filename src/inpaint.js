@@ -71,17 +71,60 @@ function download(userData, onProgress) {
   return downloading;
 }
 
+// На винде пробуем видеокарту (DirectML): на игровых ноутах это в разы быстрее.
+// Не завелась или выдала ерунду, переходим на процессор и больше её не трогаем.
+let onGpu = false, gpuFailed = false;
+
 async function getSession(userData) {
   if (!session) {
     const ort = require('onnxruntime-node');
-    session = await ort.InferenceSession.create(modelPath(userData), { executionProviders: ['cpu'] });
+    if (process.platform === 'win32' && !gpuFailed && !process.env.EYEPHOTO_CPU) {
+      try {
+        session = await ort.InferenceSession.create(modelPath(userData), {
+          executionProviders: ['dml'], enableMemPattern: false, executionMode: 'sequential',
+        });
+        onGpu = true;
+      } catch (e) {
+        console.error('Видеокарта для нейронки не завелась, считаю на процессоре:', e.message);
+        gpuFailed = true;
+      }
+    }
+    if (!session) {
+      session = await ort.InferenceSession.create(modelPath(userData), { executionProviders: ['cpu'] });
+      onGpu = false;
+    }
   }
   return session;
+}
+
+function fallBackToCpu(reason) {
+  console.error('Нейронка на видеокарте:', reason, '— перехожу на процессор');
+  gpuFailed = true;
+  session = null;
 }
 
 // rgba: Uint8Array 512*512*4, mask: Uint8Array 512*512 (0 или 255).
 // Возвращает RGBA 512*512 с дорисованной областью.
 async function run(userData, rgba, mask) {
+  try {
+    const out = await runOnce(userData, rgba, mask);
+    if (onGpu && !looksSane(out, rgba)) { fallBackToCpu('ответ похож на ошибку'); return runOnce(userData, rgba, mask); }
+    return out;
+  } catch (e) {
+    if (!onGpu) throw e;
+    fallBackToCpu(e.message);
+    return runOnce(userData, rgba, mask);
+  }
+}
+
+// Проверка ответа: не пустой и по средней яркости близок к входу.
+function looksSane(out, rgba) {
+  let a = 0, b = 0, n = 0;
+  for (let i = 0; i < out.length; i += 4 * 97) { a += out[i] + out[i + 1] + out[i + 2]; b += rgba[i] + rgba[i + 1] + rgba[i + 2]; n++; }
+  return n > 0 && Number.isFinite(a) && Math.abs(a - b) / n < 90;
+}
+
+async function runOnce(userData, rgba, mask) {
   const ort = require('onnxruntime-node');
   const s = await getSession(userData);
   const n = SIZE * SIZE;

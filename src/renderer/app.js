@@ -733,7 +733,7 @@ async function neuralRemove(l, paint, box) {
     // под вырезанным глазом лежит его исходный снимок: по нему модель видит, что за краем круга
     const photo = l.src && D.layerById(d, l.src.id);
     const under = photo && ((x, N) => x.drawImage(photo.canvas, region.x + l.src.x, region.y + l.src.y, region.w, region.h, 0, 0, N, N));
-    await im.inpaintPatch(l.canvas, mask, region, (rgba, m) => api.inpaint({ rgba, mask: m }), under);
+    await im.inpaintPatch(l.canvas, mask, region, (rgba, m) => api.inpaint({ rgba, mask: m }), under, irisOf(l));
     D.pushPixels(d, l, 'Убрать нейронкой', region.x, region.y, before);
   } catch (e) {
     console.error(e);
@@ -743,6 +743,20 @@ async function neuralRemove(l, paint, box) {
   setBusy('');
   refresh();
   requestDraw();
+}
+
+// Где у слоя зрачок и какого размера радужка: нужно нейронке для больших мест.
+function irisOf(l) {
+  if (l.irisInfo && l.irisInfo.rev === l.rev) return l.irisInfo;
+  let info = null;
+  if (l.kind === 'eye') {
+    const p = im.findPupil(l.canvas);
+    info = { x: p.found ? p.x : l.canvas.width / 2, y: p.found ? p.y : l.canvas.height / 2, R: Math.min(l.canvas.width, l.canvas.height) / 2 };
+  } else if (l.kind === 'photo' && l.irisGuess) {
+    info = { x: l.irisGuess.x, y: l.irisGuess.y, R: l.irisGuess.r };
+  }
+  if (info) { info.rev = l.rev; l.irisInfo = info; }
+  return info;
 }
 
 function removeSelection() {

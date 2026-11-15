@@ -373,7 +373,82 @@ export function patchRegion(canvas, bbox) {
 // у края круга видит продолжение радужки и дорисовывает по границе. Без подложки
 // прозрачное место отдаётся модели как «дорисуй сама», иначе она приняла бы
 // пустоту за чёрный предмет и затянула бы им половину глаза.
-export async function inpaintPatch(canvas, mask, region, run, under) {
+// Перенос мелкого рисунка поворотом. Нейронка видит место уменьшенным до 512 точек,
+// поэтому на больших заплатках мылит. Волокна радужки идут лучами от зрачка, и если
+// повернуть глаз вокруг зрачка, чистый участок с другой стороны ложится на
+// испорченное место с правильным направлением лучей. Берём у него мелкий рисунок,
+// а у нейронки общий цвет и свет.
+// iris: { x, y, R } — центр зрачка и радиус радужки в пикселях слоя.
+function chooseTurn(canvas, mask, region, iris) {
+  const side = region.w, step = Math.max(2, Math.round(side / 80));
+  const md = mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, side, side).data;
+  const pts = [];
+  for (let y = 0; y < side; y += step) for (let x = 0; x < side; x += step) {
+    if (md[(y * side + x) * 4 + 3] > 20) pts.push([region.x + x, region.y + y]);
+  }
+  if (!pts.length) return null;
+  // карта яркости слоя в уменьшенном виде: по ней отсекаем источники с бликами
+  const k = Math.min(1, 512 / Math.max(canvas.width, canvas.height));
+  const lw = Math.max(1, Math.round(canvas.width * k)), lh = Math.max(1, Math.round(canvas.height * k));
+  const lc = makeCanvas(lw, lh), lx = lc.getContext('2d', { willReadFrequently: true });
+  lx.drawImage(canvas, 0, 0, lw, lh);
+  const ld = lx.getImageData(0, 0, lw, lh).data;
+  const at = (x, y) => {
+    const ix = Math.floor(x * k), iy = Math.floor(y * k);
+    if (ix < 0 || iy < 0 || ix >= lw || iy >= lh) return null;
+    const i = (iy * lw + ix) * 4;
+    return ld[i + 3] < 200 ? null : 0.299 * ld[i] + 0.587 * ld[i + 1] + 0.114 * ld[i + 2];
+  };
+  const inMask = (x, y) => {
+    const rx = Math.round(x - region.x), ry = Math.round(y - region.y);
+    return rx >= 0 && ry >= 0 && rx < side && ry < side && md[(ry * side + rx) * 4 + 3] > 20;
+  };
+  // считаем только то, что на радужке: за её краем поворот всё равно даёт пустоту
+  const all = pts.length;
+  for (let i = pts.length - 1; i >= 0; i--) if (Math.hypot(pts[i][0] - iris.x, pts[i][1] - iris.y) > iris.R * 0.97) pts.splice(i, 1);
+  if (pts.length < all * 0.5) return null; // место в основном не на радужке
+  let best = null;
+  for (let deg = 20; deg <= 180; deg += 10) {
+    for (const sgn of [1, -1]) {
+      const a = sgn * deg * Math.PI / 180, c = Math.cos(-a), sn = Math.sin(-a);
+      let good = 0;
+      for (const [x, y] of pts) {
+        const dx = x - iris.x, dy = y - iris.y;
+        const qx = iris.x + dx * c - dy * sn, qy = iris.y + dx * sn + dy * c;
+        const L = at(qx, qy);
+        if (L != null && L < 225 && !inMask(qx, qy)) good++;
+      }
+      const score = good / pts.length - deg * 0.0008; // при равенстве берём поворот поменьше: свет похожее
+      if (!best || score > best.score) best = { a, score, good: good / pts.length };
+    }
+  }
+  return best && best.good > 0.92 ? best.a : null;
+}
+
+function detailFromTurn(canvas, region, lamaUp, iris, angle, sigma) {
+  const side = region.w;
+  const src = makeCanvas(side, side), sx = src.getContext('2d', { willReadFrequently: true });
+  sx.translate(-region.x, -region.y);
+  sx.translate(iris.x, iris.y); sx.rotate(angle); sx.translate(-iris.x, -iris.y);
+  sx.drawImage(canvas, 0, 0);
+  const blur = (c) => {
+    const b = makeCanvas(side, side), bx = b.getContext('2d', { willReadFrequently: true });
+    bx.filter = `blur(${sigma}px)`;
+    bx.drawImage(c, 0, 0);
+    return bx.getImageData(0, 0, side, side).data;
+  };
+  const S = sx.getImageData(0, 0, side, side).data, Sb = blur(src), Lb = blur(lamaUp);
+  const out = makeCanvas(side, side), ox = out.getContext('2d');
+  const img = ox.createImageData(side, side), o = img.data;
+  for (let i = 0; i < o.length; i += 4) {
+    for (let c = 0; c < 3; c++) o[i + c] = Lb[i + c] + (S[i + 3] > 0 ? S[i + c] - Sb[i + c] : 0);
+    o[i + 3] = 255;
+  }
+  ox.putImageData(img, 0, 0);
+  return out;
+}
+
+export async function inpaintPatch(canvas, mask, region, run, under, iris) {
   const N = 512, side = region.w;
   const small = makeCanvas(N, N);
   const sx = small.getContext('2d', { willReadFrequently: true });
@@ -398,10 +473,17 @@ export async function inpaintPatch(canvas, mask, region, run, under) {
   sx.putImageData(new ImageData(new Uint8ClampedArray(out), N, N), 0, 0);
 
   // Вклеиваем только закрашенное место, край заплатки размыт, чтобы не было шва.
-  const patch = makeCanvas(side, side);
+  let patch = makeCanvas(side, side);
+  const px0 = patch.getContext('2d', { willReadFrequently: true });
+  px0.imageSmoothingQuality = 'high';
+  px0.drawImage(small, 0, 0, side, side);
+  // большое место: нейронка видела его уменьшенным, возвращаем мелкий рисунок
+  const f = side / N;
+  if (iris && f > 1.25) {
+    const angle = chooseTurn(canvas, mask, region, iris);
+    if (angle != null) patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, f * 3)));
+  }
   const px = patch.getContext('2d');
-  px.imageSmoothingQuality = 'high';
-  px.drawImage(small, 0, 0, side, side);
   const soft = makeCanvas(side, side);
   const fx = soft.getContext('2d');
   fx.filter = `blur(${Math.max(1.5, side / 300)}px)`;

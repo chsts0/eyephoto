@@ -1,0 +1,54 @@
+name: tools
+
+# Сборщик глаз для обучения нейронки: отдельная программа для винды и мака.
+# Собирается при изменениях в tools/ и выкладывается в релиз tools-v1.
+
+on:
+  push:
+    branches: [main]
+    paths: ['tools/**', '.github/workflows/tools.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  collector:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Зависимости
+        run: pip install pyinstaller numpy opencv-python-headless
+
+      - name: Собрать
+        shell: bash
+        run: |
+          pyinstaller --onefile --windowed --name EyeCollect tools/collector/collect.py
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp dist/EyeCollect.exe EyeCollect-windows.exe
+            F=EyeCollect-windows.exe
+          else
+            (cd dist && zip -qry ../EyeCollect-mac.zip EyeCollect.app)
+            F=EyeCollect-mac.zip
+          fi
+          echo "FILE=$F" >> "$GITHUB_ENV"
+
+      - name: Выложить
+        shell: bash
+        run: |
+          if ! gh release view tools-v1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create tools-v1 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Сборщик глаз для обучения" \
+              --notes "EyeCollect: проходит по папке готовых фото и собирает глаза в архив для обучения нейронки." || true
+          fi
+          gh release upload tools-v1 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber

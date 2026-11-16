@@ -29,6 +29,16 @@ contextBridge.exposeInMainWorld('eyephoto', {
   openReleases: () => ipcRenderer.invoke('open-releases'),
   platform: process.env.EYEPHOTO_TEST && process.env.EYEPHOTO_PLATFORM || process.platform, // в тестах можно показать вид мака
   setMenu: (menus) => ipcRenderer.send('set-menu', menus),
+  assistantStatus: () => ipcRenderer.invoke('assistant-status'),
+  assistantDownload: () => ipcRenderer.invoke('assistant-download'),
+  onAssistantProgress: (cb) => ipcRenderer.on('assistant-progress', (_e, p) => cb(p)),
+  assistantRemove: () => ipcRenderer.invoke('assistant-remove'),
+  assistantReset: () => ipcRenderer.invoke('assistant-reset'),
+  assistantAsk: (id, question) => ipcRenderer.invoke('assistant-ask', { id, question }),
+  onAssistantChunk: (cb) => ipcRenderer.on('assistant-chunk', (_e, m) => cb(m)),
+  setZoom: (f) => ipcRenderer.invoke('set-zoom', f),
+  setNeuralDevice: (cpu) => ipcRenderer.invoke('set-neural-device', cpu),
+  modelRemove: () => ipcRenderer.invoke('model-remove'),
   onMenuCmd: (cb) => ipcRenderer.on('menu-cmd', (_e, id) => cb(id)),
   onUpdateStatus: on('update-status'),
 });

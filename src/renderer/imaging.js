@@ -430,6 +430,22 @@ function chooseTurn(canvas, mask, region, iris) {
   return out;
 }
 
+// Расширение маски на r точек (квадратом, этого хватает)
+function dilate(m, N, r) {
+  const t = new Uint8Array(m.length), o = new Uint8Array(m.length);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    let v = 0;
+    for (let k = -r; k <= r && !v; k++) { const xx = x + k; if (xx >= 0 && xx < N && m[y * N + xx]) v = 255; }
+    t[y * N + x] = v;
+  }
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    let v = 0;
+    for (let k = -r; k <= r && !v; k++) { const yy = y + k; if (yy >= 0 && yy < N && t[yy * N + x]) v = 255; }
+    o[y * N + x] = v;
+  }
+  return o;
+}
+
 // Отражение квадрата N×N (rgba по 4 байта или маска по 1) по горизонтали или вертикали.
 function flipSquare(a, N, ch, how) {
   const o = new Uint8Array(a.length);
@@ -469,7 +485,7 @@ function detailFromTurn(canvas, region, lamaUp, iris, angle, sigma) {
 // по горизонтали, отражённым по вертикали. Мелкий рисунок на больших местах берётся
 // с разных поворотов. Считается по копии слоя, сам слой не трогается.
 export const VARIANTS = 3;
-const FLIPS = [null, 'h', 'v'];
+const FLIPS = [null, 'h', 'v', 'hv'];
 
 export async function makePatch(canvas, mask, region, run, under, iris, variant = 0) {
   const N = 512, side = region.w;
@@ -492,10 +508,15 @@ export async function makePatch(canvas, mask, region, run, under, iris, variant 
   let m = new Uint8Array(N * N);
   for (let i = 0; i < m.length; i++) m[i] = md[i * 4 + 3] > 20 || (!under && alpha[i * 4 + 3] < 128) ? 255 : 0;
 
+  // «ещё варианты»: дальше по кругу те же отражения, но место чуть шире,
+  // модель видит другой край и дорисовывает иначе
+  const grow = Math.floor(variant / FLIPS.length) * 3;
+  if (grow) m = dilate(m, N, grow);
   const flip = FLIPS[variant % FLIPS.length];
-  if (flip) { rgba = flipSquare(rgba, N, 4, flip); m = flipSquare(m, N, 1, flip); }
+  const fl = (a, ch) => { for (const f of flip || '') a = flipSquare(a, N, ch, f); return a; };
+  if (flip) { rgba = fl(rgba, 4); m = fl(m, 1); }
   let out = new Uint8Array(await run(rgba, m));
-  if (flip) out = flipSquare(out, N, 4, flip);
+  if (flip) out = fl(out, 4);
   sx.putImageData(new ImageData(new Uint8ClampedArray(out.buffer), N, N), 0, 0);
 
   // Вклеиваем только закрашенное место, край заплатки размыт, чтобы не было шва.

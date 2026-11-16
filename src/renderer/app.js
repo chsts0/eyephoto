@@ -2,6 +2,8 @@ import * as im from './imaging.js';
 import * as D from './doc.js';
 import * as ui from './ui.js';
 import { initDock } from './dock.js';
+import { newDocDialog } from './newdoc.js';
+import { openSettings, assistantPanel } from './settings.js';
 
 const api = window.eyephoto;
 const $ = (id) => document.getElementById(id);
@@ -20,16 +22,17 @@ const S = {
   cur: null,          // открытый документ
   tool: 'move',
   pupilSoft: 100,     // мягкость края зрачка после сужения, % от студийной
+  prefs: { preciseCursors: false, brushCross: true, units: 'mm', shiftSwitch: true, wheelZoom: false, variants: 3, history: 60, jpegQuality: 97, neuralCpu: false, autoUpdate: true, uiScale: 1 }, // настройки из окна «Настройки»
   opts: {
     move: { auto: true },
     marquee: { center: true, shape: 'circle', feather: 8 },
     lasso: { feather: 0 },
     patch: { size: 60 },
-    stamp: { size: 80, hard: 50, flow: 100, aligned: true },
-    heal: { size: 80, hard: 50, aligned: true },
-    brush: { size: 40, hard: 80, flow: 100, color: '#000000' },
-    eraser: { size: 60, hard: 80, flow: 100 },
-    burn: { size: 120, hard: 0, flow: 50, mode: 'burn', range: 'mid', protect: true },
+    stamp: { size: 80, hard: 0, flow: 100, aligned: true },
+    heal: { size: 80, hard: 0, aligned: false, diffusion: 5 },
+    brush: { size: 40, hard: 0, flow: 100, color: '#000000' },
+    eraser: { size: 60, hard: 0, flow: 100 },
+    burn: { size: 120, hard: 0, flow: 15, mode: 'burn', range: 'shadows', protect: true },
     pupil: { ratio: 23.5 },
   },
   drag: null,
@@ -250,12 +253,76 @@ function drawOverlay() {
     strokeBoth(px, false);
   }
 
+  drawMeasure(d, dpr);
+
   const sized = S.opts[S.tool] && S.opts[S.tool].size;
   if (sized && S.cursor && !(g && g.type === 'pan') && !(S.ctrl && !g)) {
     ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 }, '#fff', false);
+    if (S.prefs.brushCross) {
+      // перекрестие в центре кисти: видно, куда именно ляжет мазок
+      const q = 5 * px, c0 = S.cursor;
+      octx.beginPath(); octx.moveTo(c0.x - q, c0.y); octx.lineTo(c0.x + q, c0.y); octx.moveTo(c0.x, c0.y - q); octx.lineTo(c0.x, c0.y + q);
+      octx.lineWidth = 3 * px; octx.strokeStyle = 'rgba(0,0,0,.55)'; octx.stroke();
+      octx.lineWidth = 1.25 * px; octx.strokeStyle = '#fff'; octx.stroke();
+    }
     const hd = S.opts[S.tool].hard;
     if (g && g.type === 'brushsize' && hd != null && hd > 2) ring({ x: S.cursor.x, y: S.cursor.y, r: sized / 2 * hd / 100 }, 'rgba(255,90,90,.9)', false);
   }
+}
+
+// --- Расстояния на Ctrl, как в фотошопе ----------------------------------------
+// С зажатым Ctrl (на маке Cmd) от выбранного слоя видны расстояния: до слоя под
+// курсором, а если под курсором пусто, до краёв листа. Цифры в мм или точках.
+const MEASURE = '#ff4fd8';
+function boxOf(ls) {
+  const bs = ls.map((l) => { const c = D.corners(l), xs = c.map((q) => q.x), ys = c.map((q) => q.y); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; });
+  return { x0: Math.min(...bs.map((b) => b[0])), y0: Math.min(...bs.map((b) => b[1])), x1: Math.max(...bs.map((b) => b[2])), y1: Math.max(...bs.map((b) => b[3])) };
+}
+function measureText(d, px) {
+  if (S.prefs.units === 'px') return `${Math.round(px)} px`;
+  return `${(px / d.dpi * 25.4).toFixed(1).replace('.', ',')} мм`;
+}
+function drawMeasure(d, dpr) {
+  const g = S.drag;
+  if (!S.ctrl || !S.cursor || (g && g.type !== 'move')) return;
+  if (S.tool !== 'move' && !TEMP_MOVE.includes(S.tool)) return;
+  const act = D.activeLayers(d).filter((l) => D.shown(d, l));
+  if (!act.length) return;
+  const A = boxOf(act);
+  const under = !g && d.layers.slice().reverse().find((l) => D.shown(d, l) && !act.includes(l) && D.hit(l, S.cursor));
+  const B = under ? boxOf([under]) : { x0: 0, y0: 0, x1: d.w, y1: d.h };
+  const v = d.view, sx = (x) => (x * v.scale + v.ox) * dpr, sy = (y) => (y * v.scale + v.oy) * dpr;
+  const lines = [];
+  // по горизонтали: зазор между слоями или расстояния внутри
+  const midY = (Math.max(A.y0, B.y0) + Math.min(A.y1, B.y1)) / 2, yLine = Math.max(A.y0, B.y0) < Math.min(A.y1, B.y1) ? midY : (A.y0 + A.y1) / 2;
+  if (A.x0 >= B.x1) lines.push(['h', B.x1, A.x0, yLine]);
+  else if (A.x1 <= B.x0) lines.push(['h', A.x1, B.x0, yLine]);
+  else { if (A.x0 > B.x0) lines.push(['h', B.x0, A.x0, yLine]); if (B.x1 > A.x1) lines.push(['h', A.x1, B.x1, yLine]); }
+  const midX = (Math.max(A.x0, B.x0) + Math.min(A.x1, B.x1)) / 2, xLine = Math.max(A.x0, B.x0) < Math.min(A.x1, B.x1) ? midX : (A.x0 + A.x1) / 2;
+  if (A.y0 >= B.y1) lines.push(['v', B.y1, A.y0, xLine]);
+  else if (A.y1 <= B.y0) lines.push(['v', A.y1, B.y0, xLine]);
+  else { if (A.y0 > B.y0) lines.push(['v', B.y0, A.y0, xLine]); if (B.y1 > A.y1) lines.push(['v', A.y1, B.y1, xLine]); }
+  octx.save();
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.lineWidth = dpr; octx.strokeStyle = MEASURE; octx.fillStyle = MEASURE;
+  if (under) { octx.strokeRect(sx(B.x0), sy(B.y0), sx(B.x1) - sx(B.x0), sy(B.y1) - sy(B.y0)); }
+  octx.font = `600 ${11 * dpr}px "Segoe UI", Inter, system-ui, sans-serif`;
+  octx.textAlign = 'center'; octx.textBaseline = 'middle';
+  for (const [dir, a, b, at] of lines) {
+    if (b - a < 0.5) continue;
+    const [x0, y0, x1, y1] = dir === 'h' ? [sx(a), sy(at), sx(b), sy(at)] : [sx(at), sy(a), sx(at), sy(b)];
+    octx.beginPath(); octx.moveTo(x0, y0); octx.lineTo(x1, y1);
+    const t = 4 * dpr; // засечки на концах
+    if (dir === 'h') { octx.moveTo(x0, y0 - t); octx.lineTo(x0, y0 + t); octx.moveTo(x1, y1 - t); octx.lineTo(x1, y1 + t); }
+    else { octx.moveTo(x0 - t, y0); octx.lineTo(x0 + t, y0); octx.moveTo(x1 - t, y1); octx.lineTo(x1 + t, y1); }
+    octx.stroke();
+    const txt = measureText(d, b - a), tw = octx.measureText(txt).width + 12 * dpr, th = 18 * dpr;
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    octx.fillStyle = MEASURE;
+    octx.beginPath(); octx.roundRect(cx - tw / 2, cy - th / 2, tw, th, 5 * dpr); octx.fill();
+    octx.fillStyle = '#fff'; octx.fillText(txt, cx, cy + 0.5 * dpr);
+  }
+  octx.restore();
 }
 
 // Край выделения считается по маске: все обводки сливаются в одно пятно,
@@ -696,6 +763,27 @@ for (const [key, f] of Object.entries(im.FORMATS)) {
   card.onclick = () => addDoc(sheetDoc(key));
   $('sheetCards').appendChild(card);
 }
+{
+  // свой размер: окно с шириной, высотой, единицами, разрешением и фоном
+  const card = ui.el('button', 'card');
+  const art = ui.el('div', 'card-art', ui.icon('plus'));
+  card.append(art, ui.el('div', 'card-name', 'Свой размер'), ui.el('div', 'card-note', 'как в фотошопе'));
+  card.onclick = () => customDoc();
+  $('sheetCards').appendChild(card);
+}
+async function customDoc() {
+  const presets = Object.entries(im.FORMATS).map(([id, f]) => ({ id, label: `${f.label} · ${f.note}`, w: f.w, h: f.h, dpi: im.DPI }));
+  presets.push({ id: 'sq20', label: 'Квадрат · 20 × 20 см', w: 3937, h: 3937, dpi: im.DPI });
+  const last = (await api.settings()).newDoc || null;
+  const n = S.docs.length + 1;
+  const r = await newDocDialog({ presets, last, defaultName: `Без названия ${n}` });
+  if (!r) return;
+  api.setSettings({ newDoc: r.saved });
+  const doc = D.makeDoc({ name: r.name, w: r.w, h: r.h, dpi: r.dpi, background: r.background });
+  doc.sheet = true;
+  doc.active = [];
+  addDoc(doc);
+}
 $('homeClose').innerHTML = ui.icon('close');
 $('homeClose').onclick = () => showHome(false);
 $('homeOpen').innerHTML = 'Открыть файл…';
@@ -769,18 +857,45 @@ function variantsLive() {
   return !!(v && S.cur === v.d && v.d.undo[v.d.undo.length - 1] === v.top && !v.d.sel && D.layerById(v.d, v.l.id));
 }
 
+const VARIANTS_MAX = 9;
 async function startVariants(v) {
   v.top = v.d.undo[v.d.undo.length - 1];
   v.cur = 0;
+  v.total = S.prefs.variants === 1 ? 1 : im.VARIANTS;
   S.variants = v;
   refreshCtx();
-  for (let k = 1; k < im.VARIANTS; k++) {
-    let p;
-    try { p = await v.make(k); } catch (e) { console.error(e); break; }
-    if (S.variants !== v) return;
-    v.patches[k] = p;
-    refreshCtx();
-  }
+  computeVariants(v);
+}
+
+// досчитывает недостающие варианты по одному, пока выбор открыт
+async function computeVariants(v) {
+  if (v.running) return;
+  v.running = true;
+  try {
+    for (let k = 1; k < v.total; k++) {
+      if (v.patches[k]) continue;
+      let p;
+      try { p = await v.make(k); } catch (e) { console.error(e); break; }
+      if (S.variants !== v) return;
+      v.patches[k] = p;
+      refreshCtx();
+    }
+  } finally { v.running = false; }
+}
+
+// «Ещё варианты»: как «Создать» в фотошопе, добавляет три новых к уже готовым
+function moreVariants() {
+  const v = S.variants;
+  if (!variantsLive() || v.total >= VARIANTS_MAX) return;
+  v.total = Math.min(VARIANTS_MAX, v.total + 3);
+  refreshCtx();
+  computeVariants(v);
+}
+
+// «Готово»: оставить выбранный вариант и убрать выбор
+function acceptVariant() {
+  S.variants = null;
+  refreshCtx();
 }
 
 function pickVariant(k) {
@@ -1352,6 +1467,8 @@ async function openTemplate(item) {
     return;
   }
   doc.tplEyes = eyes;
+  // откуда открыт: если это тоже шаблон, ведём к самому первому листу с глазами
+  doc.srcDoc = src && (src.srcDoc && S.docs.includes(src.srcDoc) && !eyeSources(src).length ? src.srcDoc : src);
   addDoc(doc);
   setBusy('');
   if (!doc.slots.length) ui.toast('В шаблоне не нашлось чёрных мест под фото');
@@ -1411,6 +1528,16 @@ function refreshTemplates(list) {
     sec.appendChild(grid);
     box.appendChild(sec);
   }
+  // в шаблоне: вернуться к листу, из которого он открыт
+  const back = ui.el('button', 'btn tpl-back', '← К исходному листу');
+  back.id = 'tplBack';
+  back.hidden = true;
+  back.onclick = () => { const src = S.cur && S.cur.srcDoc; if (src && S.docs.includes(src)) { switchDoc(src); showHome(false); refresh(); } };
+  box.appendChild(back);
+}
+function refreshBack() {
+  const b = $('tplBack');
+  if (b) b.hidden = !(S.cur && S.cur.srcDoc && S.docs.includes(S.cur.srcDoc));
 }
 async function loadTemplateList() { refreshTemplates(await api.templates()); }
 
@@ -1452,7 +1579,7 @@ function history(back) {
 
 async function sheetJpeg(d) {
   const sheet = D.flatten(d);
-  const blob = await new Promise((r) => sheet.toBlob(r, 'image/jpeg', 0.97));
+  const blob = await new Promise((r) => sheet.toBlob(r, 'image/jpeg', S.prefs.jpegQuality / 100));
   return im.setJpegDpi(await blob.arrayBuffer(), d.dpi);
 }
 
@@ -1641,7 +1768,9 @@ function toolKey(k) {
   const g = GROUPS.find((q) => q !== '-' && groupKey(q) === key);
   if (!g) return null;
   const cur = groupCurrent(g), inGroup = g.some((m) => member(m).tool === S.tool);
-  return shift && g.length > 1 && inGroup ? [g, g[(g.indexOf(cur) + 1) % g.length]] : [g, cur];
+  // без «Shift для переключения» повторное нажатие буквы листает группу
+  const cycle = S.prefs.shiftSwitch ? shift : !shift;
+  return cycle && g.length > 1 && inGroup ? [g, g[(g.indexOf(cur) + 1) % g.length]] : [g, cur];
 }
 
 // Круг ставится по центру глаза, как в панели студии для фотошопа. Если зрачок
@@ -1693,6 +1822,18 @@ function applyPupil() {
   const before = l.canvas.getContext('2d').getImageData(rect.x, rect.y, rect.w, rect.h);
   im.shrinkPupil(l.canvas, lp, R, im.PUPIL_RATIO, S.pupilSoft / 100);
   D.pushPixels(d, l, 'Сузить зрачок', rect.x, rect.y, before);
+  // готовый глаз сразу встаёт по центру листа в студийном размере, вид подгоняется под него;
+  // если глаз на листе несколько, остальные прячутся, как при выборе в ленте глаз
+  if (l.kind === 'eye' && !l.tplPart && !d.template) {
+    D.structEdit(d, 'По центру', () => {
+      l.scale = im.singleIris(d.w, d.h) / Math.max(l.canvas.width, l.canvas.height);
+      l.cx = d.w / 2; l.cy = d.h / 2; l.rot = 0;
+      d.active = [l.id];
+    });
+    D.mergeLast(d, 2, 'Сузить зрачок');
+    d.solo = eyesOf(d).length > 1 ? l.eye : 0;
+    fit();
+  }
   // дело сделано: круг убираем и возвращаем инструмент, которым работали до этого
   S.pupil = null;
   if (S.tool === 'pupil') setTool(S.prevTool && S.prevTool !== 'pupil' ? S.prevTool : 'lasso');
@@ -1916,6 +2057,10 @@ function healStroke(g, bx, by, bw, bh) {
     }
   }
   const fill = pullPush(diff, wt, w, h);
+  // диффузия как в фотошопе (1–7): чем больше, тем мягче растекается поправка цвета
+  const avgR = g.dabs.reduce((a, d) => a + d.r, 0) / g.dabs.length;
+  const rad = Math.round((S.opts.heal.diffusion || 5) * Math.max(1, avgR / 30));
+  for (const ch of fill) boxBlur(ch, w, h, rad);
   const cur = l.canvas.getContext('2d'), out = cur.getImageData(x0, y0, w, h), od = out.data;
   for (let i = 0; i < n; i++) {
     const m = M[i * 4 + 3] / 255;
@@ -1927,6 +2072,30 @@ function healStroke(g, bx, by, bw, bh) {
     od[i * 4 + 3] = O[i * 4 + 3];
   }
   cur.putImageData(out, x0, y0);
+}
+
+// Размытие одного канала прямоугольником r, дважды (почти по Гауссу)
+function boxBlur(a, w, h, r) {
+  if (r < 1) return;
+  const t = new Float32Array(a.length);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) {
+      let acc = 0, cnt = 0;
+      for (let x = -r; x < w; x++) {
+        if (x + r < w) { acc += a[y * w + x + r]; cnt++; }
+        if (x - r - 1 >= 0) { acc -= a[y * w + x - r - 1]; cnt--; }
+        if (x >= 0) t[y * w + x] = acc / cnt;
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0, cnt = 0;
+      for (let y = -r; y < h; y++) {
+        if (y + r < h) { acc += t[(y + r) * w + x]; cnt++; }
+        if (y - r - 1 >= 0) { acc -= t[(y - r - 1) * w + x]; cnt--; }
+        if (y >= 0) a[y * w + x] = acc / cnt;
+      }
+    }
+  }
 }
 
 // Плавно заполняет пропуски: значения с весом 1 остаются, остальные
@@ -1976,19 +2145,35 @@ function endStroke(g) {
 
 // Курсоры по образцу фотошопа. Для кистей системный курсор прячется: вместо него
 // рисуется круг размером с кисть.
-const svgCursor = (body, x, y, fallback) =>
-  `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'>${body}</svg>`)}") ${x} ${y}, ${fallback}`;
+const svgCursor = (body, x, y, fallback, size = 24) =>
+  `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}' viewBox='0 0 ${size} ${size}' fill='none' stroke-linecap='round' stroke-linejoin='round'>${body}</svg>`)}") ${x} ${y}, ${fallback}`;
+// Курсор как в фотошопе: рабочая точка — перекрестие в левом верхнем углу,
+// значок инструмента справа снизу от неё, как стрелка мыши и всё остальное в системе.
+// sign: '+' или '−' рядом с перекрестием (добавить, вычесть).
+function badgeCursor(iconName, sign) {
+  const body = ui.iconBody(iconName).replace(/class="f"/g, 'data-f="1"');
+  const tw = (b, w, c) => b.replace(/<(path|circle|ellipse|rect)\b/g, `<$1 stroke='${c}' stroke-width='${w}'`).replace(/data-f="1"/g, `fill='${c}'`);
+  const cross = two('M6 1v3.2M6 8.8V12M1 6h3.2M8.8 6H12');
+  const badge = `<g transform='translate(12 12) scale(.85)'>${tw(body, 3.2, '#fff')}${tw(body, 1.4, '#000')}</g>`;
+  const mark = sign === '+' ? two('M16 4h5M18.5 1.5v5') : sign === '-' ? two('M16 4h5') : '';
+  return svgCursor(cross + badge + mark, 6, 6, 'crosshair', 32);
+}
 const two = (d, extra = '') => `<path d='${d}' stroke='#fff' stroke-width='3' ${extra}/><path d='${d}' stroke='#000' stroke-width='1.2' ${extra}/>`;
 const CURSORS = {
   move: svgCursor(`<path d='M4 3l9 5.2-3.7 1 2.1 4.3-1.7.8-2.1-4.3L5 12.600z' fill='#000' stroke='#fff' stroke-width='1'/>${two('M17 13v8M13 17h8M17 13l-1.300 1.500M17 13l1.300 1.500M17 21l-1.300-1.500M17 21l1.300-1.500M13 17l1.500-1.300M13 17l1.500 1.300M21 17l-1.500-1.300M21 17l-1.500 1.300')}`, 4, 3, 'default'),
-  marquee: svgCursor(two('M12 4v6M12 14v6M4 12h6M14 12h6'), 12, 12, 'crosshair'),
-  lasso: svgCursor(`${two('M13 5c-4.400 0-8 2-8 4.500S8.600 14 13 14s8-2 8-4.500S17.400 5 13 5z')}${two('M8.500 13.300c-1.400.900-1.500 2.600-.300 3.300 1.100.700 2.500-.100 2.300-1.300M9.600 16.500 7 21')}${two('M16 19.500h5M18.500 17v5')}`, 7, 21, 'crosshair'),
-  lassoMinus: svgCursor(`${two('M13 5c-4.400 0-8 2-8 4.500S8.600 14 13 14s8-2 8-4.500S17.400 5 13 5z')}${two('M8.500 13.300c-1.400.900-1.500 2.600-.300 3.300 1.100.700 2.500-.100 2.300-1.300M9.600 16.500 7 21')}${two('M16 19.500h5')}`, 7, 21, 'crosshair'),
-  pupil: svgCursor(two('M12 5v5M12 14v5M5 12h5M14 12h5'), 12, 12, 'default'),
+  marquee: badgeCursor('marquee'),
+  ellipse: badgeCursor('ellipse'),
+  rect: badgeCursor('rect'),
+  lasso: badgeCursor('lasso'),
+  lassoMinus: badgeCursor('lasso', '-'),
+  lassoPlus: badgeCursor('lasso', '+'),
+  pupil: badgeCursor('pupil'),
   zoomIn: svgCursor(`<circle cx='10' cy='10' r='6' fill='#fff' fill-opacity='.25' stroke='#fff' stroke-width='3'/><circle cx='10' cy='10' r='6' stroke='#000' stroke-width='1.300'/>${two('M14.500 14.500 20 20M7.500 10h5M10 7.500v5')}`, 10, 10, 'zoom-in'),
   zoomOut: svgCursor(`<circle cx='10' cy='10' r='6' fill='#fff' fill-opacity='.25' stroke='#fff' stroke-width='3'/><circle cx='10' cy='10' r='6' stroke='#000' stroke-width='1.300'/>${two('M14.500 14.500 20 20M7.500 10h5')}`, 10, 10, 'zoom-out'),
   dot: svgCursor(two('M12 9.500v5M9.500 12h5'), 12, 12, 'crosshair'),
+  source: badgeCursor('stamp'),
 };
+window.__cursors = CURSORS;
 const SIZED = ['patch', 'heal', 'stamp', 'brush', 'eraser', 'burn'];
 
 function setCursor(over) {
@@ -1998,12 +2183,14 @@ function setCursor(over) {
     if (t === 'hand' || S.space) c = S.drag && S.drag.type === 'pan' ? 'grabbing' : 'grab';
     else if (S.ctrl && TEMP_MOVE.includes(t)) c = CURSORS.move;
     else if (t === 'zoom') c = S.alt ? CURSORS.zoomOut : CURSORS.zoomIn;
-    else if (t === 'lasso') c = S.alt ? CURSORS.lassoMinus : CURSORS.lasso;
+    else if (t === 'lasso') c = S.prefs.preciseCursors ? 'crosshair' : S.alt ? CURSORS.lassoMinus : CURSORS.lasso;
+    else if (t === 'marquee') c = S.prefs.preciseCursors ? 'crosshair' : CURSORS[{ circle: 'marquee', ellipse: 'ellipse', rect: 'rect' }[S.opts.marquee.shape]];
     else if (SIZED.includes(t)) {
       // совсем маленькую кисть кругом не разглядеть, показываем перекрестие
       const tiny = S.cur && S.opts[t].size * S.cur.view.scale < 7;
-      c = (t === 'stamp' || t === 'heal') && S.alt ? CURSORS.marquee : tiny ? CURSORS.dot : 'none';
-    } else c = CURSORS[t] || 'default';
+      c = (t === 'stamp' || t === 'heal') && S.alt ? CURSORS.source : tiny ? CURSORS.dot : 'none';
+    } else if (S.prefs.preciseCursors && (t === 'lasso' || t === 'pupil')) c = 'crosshair';
+    else c = CURSORS[t] || 'default';
   }
   canvas.style.cursor = c;
 }
@@ -2295,7 +2482,8 @@ canvas.addEventListener('wheel', (e) => {
   // щипок на трекпаде браузер присылает как колесо с Ctrl, хотя Ctrl никто не жмёт
   if (e.ctrlKey && !S.ctrlPhys) { zoomAt(x, y, Math.exp(-e.deltaY * 0.01)); return; }
   // как в фотошопе: колесо листает вверх-вниз, с Ctrl или Shift вбок, с Alt масштабирует
-  if (e.altKey) {
+  // «Колесо масштабирует» в настройках: как одноимённая галочка фотошопа, Alt тогда листает
+  if (e.altKey !== !!S.prefs.wheelZoom) {
     const smooth = e.deltaMode === 0 && Math.abs(e.deltaY) < 40; // трекпад: много мелких шагов
     zoomAt(x, y, smooth ? Math.exp(-e.deltaY * 0.006) : e.deltaY < 0 ? 1.15 : 1 / 1.15);
     return;
@@ -2387,7 +2575,7 @@ function refreshOptions() {
     size(); range('Жёсткость', 'hard', 0, 100, '%'); range('Нажим', 'flow', 1, 100, '%');
     if (S.tool === 'stamp') check('Выравн.', 'aligned');
   } else if (S.tool === 'heal') {
-    size(); range('Жёсткость', 'hard', 0, 100, '%'); check('Выравн.', 'aligned');
+    size(); range('Жёсткость', 'hard', 0, 100, '%'); check('Выравн.', 'aligned'); range('Диффузия', 'diffusion', 1, 7);
   } else if (S.tool === 'brush') {
     const c = ui.el('input', 'swatch');
     c.type = 'color'; c.value = o.color; c.title = 'Цвет кисти';
@@ -2840,6 +3028,7 @@ function refresh() {
   refreshStatus();
   refreshActions();
   refreshCtx();
+  refreshBack();
   syncMacMenu();
   const d = S.cur;
   $('saveBtn').disabled = $('placeBtn').disabled = false;
@@ -2857,13 +3046,22 @@ function refreshCtx() {
     bar.hidden = false;
     bar.classList.add('variants');
     bar.textContent = '';
-    for (let k = 0; k < im.VARIANTS; k++) {
+    for (let k = 0; k < v.total; k++) {
       const b = ui.el('button', 'var' + (v.cur === k ? ' on' : ''));
       if (v.patches[k]) { v.thumbs = v.thumbs || []; b.appendChild(v.thumbs[k] || (v.thumbs[k] = variantThumb(v, k))); }
       else { b.disabled = true; b.appendChild(ui.el('span', 'var-wait')); }
+      b.title = `Вариант ${k + 1}`;
       b.onclick = () => pickVariant(k);
       bar.appendChild(b);
     }
+    bar.appendChild(ui.el('div', 'var-sep'));
+    const more = ui.el('button', 'var-act', 'Ещё варианты');
+    more.disabled = v.total >= VARIANTS_MAX || v.patches.length < v.total || v.patches.some((p, i) => i < v.total && !p);
+    more.onclick = moreVariants;
+    const done = ui.el('button', 'var-act primary', 'Готово');
+    done.title = 'Оставить выбранный вариант (Enter)';
+    done.onclick = acceptVariant;
+    bar.append(more, done);
     return;
   }
   bar.hidden = !(d && d.sel);
@@ -2899,6 +3097,7 @@ const hasLayer = () => !!layer();
 
 const CMD = {
   new: { label: 'Новый документ…', keys: 'Ctrl+N', run: () => showHome(true) },
+  newCustom: { label: 'Свой размер…', keys: 'Ctrl+Alt+N', run: () => customDoc() },
   open: { label: 'Открыть…', keys: 'Ctrl+O', run: () => openDialog('open') },
   place: { label: 'Поместить снимок…', keys: 'Ctrl+Shift+O', run: () => openDialog('place') },
   save: { label: 'Сохранить JPEG с номером…', keys: 'Ctrl+S', run: saveNumbered, enabled: has },
@@ -2947,17 +3146,20 @@ const CMD = {
   zoomIn: { label: 'Приблизить', keys: 'Ctrl+=', run: () => zoomAt(...center(), 1.25), enabled: has },
   zoomOut: { label: 'Отдалить', keys: 'Ctrl+-', run: () => zoomAt(...center(), 1 / 1.25), enabled: has },
   resetPanels: { label: 'Вернуть панели по умолчанию', run: () => dockUi.reset() },
+  settings: { label: 'Настройки…', keys: 'Ctrl+K', run: () => showSettings() },
+  assistant: { label: 'Спросить помощника', keys: 'F1', run: () => showSettings('assistant') },
 };
 
 const dockUi = initDock({ dock: document.querySelector('.dock'), load: () => null, save: (dock) => api.setSettings({ dock }) });
 
 const MENUS = [
-  { title: 'Файл', items: ['new', 'open', 'place', '-', 'save', 'savePsd', 'export', '-', 'tplFolder', 'saveFolder', 'pointPrefix', '-', 'close'] },
-  { title: 'Правка', items: ['undo', 'redo', '-', 'transform', 'clear'] },
+  { title: 'Файл', items: ['new', 'newCustom', 'open', 'place', '-', 'save', 'savePsd', 'export', '-', 'tplFolder', 'saveFolder', 'pointPrefix', '-', 'close'] },
+  { title: 'Правка', items: ['undo', 'redo', '-', 'transform', 'clear', '-', 'settings'] },
   { title: 'Слой', items: ['layerNew', 'layerCopy', 'layerDelete', '-', 'layerUp', 'layerDown', 'layerMerge', 'layerClip', '-', 'layoutCorners', 'layoutWhole', 'layoutSingle', 'layoutSwap'] },
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
   { title: 'Фильтр', items: ['develop', 'neural'] },
   { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides', '-', 'resetPanels'] },
+  { title: 'Справка', items: ['assistant'] },
 ];
 // На маке меню живёт в системной строке сверху экрана, как у всех программ.
 if (MAC) {
@@ -3012,6 +3214,7 @@ window.addEventListener('keydown', (e) => {
     if (!$('home').hidden && S.cur) showHome(false); else if (S.cur.sel) run('deselect');
     return;
   }
+  if (k === 'Enter' && variantsLive()) { acceptVariant(); return; }
   if (k === 'Enter' && S.tool === 'pupil') { applyPupil(); return; }
   const tk = toolKey(k);
   if (tk) {
@@ -3080,6 +3283,61 @@ window.addEventListener('drop', async (e) => {
   openMany(files, 'place');
 });
 
+// --- Настройки ---------------------------------------------------------------
+const assistantUi = assistantPanel(api);
+function setPref(k, v) {
+  S.prefs[k] = v;
+  api.setSettings({ prefs: S.prefs });
+  setCursor(); requestDraw();
+}
+const pref = (k, label, type, extra = {}) => ({ label, type, get: () => S.prefs[k], set: (v) => setPref(k, v), ...extra });
+function showSettings(start) {
+  const schema = [
+    { id: 'main', title: 'Основные', items: [
+      { label: 'Номер точки', hint: 'С него начинаются имена готовых файлов, например 4-1233', words: 'префикс имя файла', type: 'button', button: 'Изменить…', after: true,
+        run: async () => { const v = await askPrefix((await api.settings()).pointPrefix); if (v) ui.toast(`Имена файлов теперь начинаются с ${v}-`); } },
+      { label: 'Текущий номер точки', type: 'info', get: async () => (await api.settings()).pointPrefix || 'не задан' },
+      { label: 'Папка готовых фото', hint: 'Внутри неё программа сама находит папку месяца и дня', words: 'сохранение путь', type: 'button', button: 'Выбрать…', after: true, run: () => api.chooseSaveRoot() },
+      { label: 'Сейчас', type: 'info', get: async () => (await api.settings()).savePath || 'не выбрана' },
+      { label: 'Папка шаблонов', hint: 'Без своей папки работают шаблоны, встроенные в программу', words: 'psd шаблоны', type: 'button', button: 'Выбрать…', after: true, run: async () => { if (await api.chooseTemplates()) loadTemplateList(); } },
+      { label: 'Шаблоны сейчас', type: 'info', get: async () => (await api.settings()).templatesPath || 'встроенные' },
+      { label: 'Вернуть встроенные шаблоны', type: 'button', button: 'Вернуть', after: true, run: async () => { await api.setSettings({ templatesPath: '' }); loadTemplateList(); } },
+      pref('jpegQuality', 'Качество JPEG', 'select', { hint: 'Для печати хватает 95–97', words: 'сохранение сжатие', options: [[90, '90'], [95, '95'], [97, '97 (как сейчас)'], [100, '100, без сжатия']] }),
+    ] },
+    { id: 'ui', title: 'Интерфейс', items: [
+      pref('uiScale', 'Масштаб интерфейса', 'select', { hint: 'Крупнее или мельче кнопки и текст', words: 'размер шрифта', options: [[0.9, '90%'], [1, '100%'], [1.1, '110%'], [1.25, '125%']], set: (v) => { setPref('uiScale', v); api.setZoom(v); } }),
+      pref('units', 'Единицы для расстояний', 'select', { hint: 'В подписях расстояний на Ctrl', words: 'мм пиксели линейка', options: [['mm', 'Миллиметры'], ['px', 'Пиксели']] }),
+      { label: 'Направляющие по центру листа', hint: 'Ctrl+;', type: 'toggle', get: () => S.guides, set: (v) => { S.guides = v; api.setSettings({ guides: v }); requestDraw(); } },
+      { label: 'Расположение панелей', hint: 'Порядок, ширина и свёрнутые панели справа', type: 'button', button: 'Вернуть как было', run: () => dockUi.reset() },
+    ] },
+    { id: 'tools', title: 'Инструменты', items: [
+      pref('preciseCursors', 'Курсоры', 'select', { hint: 'Стандартные: перекрестие и значок инструмента. Точные: только перекрестие', options: [[false, 'Стандартные'], [true, 'Точные']] }),
+      pref('brushCross', 'Перекрестие в центре кисти', 'toggle', { hint: 'Видно, куда именно ляжет мазок' }),
+      pref('shiftSwitch', 'Shift для переключения инструментов', 'toggle', { hint: 'Включено: Shift+буква листает группу. Выключено: повторное нажатие буквы', words: 'клавиши группа' }),
+      pref('wheelZoom', 'Масштаб колесом мыши', 'toggle', { hint: 'Колесо приближает, с Alt листает', words: 'прокрутка зум' }),
+    ] },
+    { id: 'neural', title: 'Нейронка', items: [
+      pref('variants', 'Вариантов сразу', 'select', { hint: 'Один считается быстрее, три как в фотошопе', words: 'варианты заплатка', options: [[3, '3'], [1, '1']] }),
+      pref('neuralCpu', 'Считать на процессоре', 'toggle', { hint: 'Включите, если на видеокарте нейронка ошибается или вылетает', words: 'видеокарта gpu', set: (v) => { setPref('neuralCpu', v); api.setNeuralDevice(v); } }),
+      { label: 'Файл нейронки', type: 'info', get: async () => ((await api.modelStatus()).ready ? 'скачан, 200 МБ' : 'не скачан') },
+      { label: 'Скачать нейронку заново', hint: 'Если работает странно или файл повреждён', type: 'button', button: 'Скачать', after: true, run: async () => { await api.modelRemove(); S.modelReady = false; await ensureModel(); } },
+    ] },
+    { id: 'pupil', title: 'Зрачок', items: [
+      { label: 'Растушёвка глаза', hint: 'Мягкость края после вырезания', words: 'край вырезка', type: 'number', min: 0, max: 40, unit: 'px', get: () => S.opts.marquee.feather, set: (v) => { S.opts.marquee.feather = v; pupilUi.feather.set(v); api.setSettings({ eyeFeather: v }); } },
+      { label: 'Мягкость края зрачка', hint: '100% как в студийном плагине', type: 'number', min: 30, max: 300, step: 5, unit: '%', get: () => S.pupilSoft, set: (v) => { S.pupilSoft = v; pupilUi.soft.set(v); api.setSettings({ pupilSoft: v }); } },
+    ] },
+    { id: 'history', title: 'История', items: [
+      pref('history', 'Шагов истории', 'number', { hint: 'Больше шагов — больше памяти', words: 'отмена undo', min: 20, max: 300, step: 10, set: (v) => { setPref('history', v); D.setHistoryLimit(v); } }),
+    ] },
+    { id: 'updates', title: 'Обновления', items: [
+      pref('autoUpdate', 'Проверять обновления сами', 'toggle', { hint: 'Применится при следующем запуске' }),
+      { label: 'Версия программы', type: 'info', get: () => api.version() },
+      { label: 'Проверить сейчас', type: 'button', button: 'Проверить', run: () => api.checkUpdate() },
+    ] },
+  ];
+  openSettings(schema, { start, assistant: assistantUi });
+}
+
 // --- Обновления -------------------------------------------------------------
 
 function setUpdate(dot, text, action) {
@@ -3099,6 +3357,7 @@ api.onUpdateStatus((s) => {
     case 'manual': return setUpdate('busy', `Вышла версия ${s.version}`, { label: 'Скачать', run: api.openReleases });
     case 'ready': return setUpdate('ok', `Версия ${s.version} поставится при закрытии`, { label: 'Перезапустить', run: api.installUpdate });
     case 'error': return setUpdate('err', 'Обновления недоступны, нужен интернет', { label: 'Повторить', run: api.checkUpdate });
+    case 'off': return setUpdate('', 'Автообновление выключено', { label: 'Проверить', run: api.checkUpdate });
   }
 });
 
@@ -3109,6 +3368,8 @@ loadTemplateList();
 
 api.settings().then((s) => {
   if (s.guides === false) S.guides = false;
+  if (s.prefs) Object.assign(S.prefs, s.prefs);
+  D.setHistoryLimit(S.prefs.history);
   if (s.dock) dockUi.restore(s.dock);
   if (typeof s.eyeFeather === 'number') { S.opts.marquee.feather = s.eyeFeather; pupilUi.feather.set(s.eyeFeather); }
   if (typeof s.pupilSoft === 'number') { S.pupilSoft = s.pupilSoft; pupilUi.soft.set(s.pupilSoft); }

@@ -38,6 +38,8 @@ const ICONS = {
   open: '<path d="M10 13V4m0 0L6.500 7.500M10 4l3.500 3.500M4 13v2.500h12V13"/>',
 };
 
+export const iconBody = (name) => ICONS[name] || '';
+
 export function icon(name) {
   return `<svg class="ic" viewBox="0 0 20 20" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 }
@@ -96,6 +98,7 @@ export function combo(e) {
   let key = CODES[e.code];
   if (!key && e.code.startsWith('Key')) key = e.code.slice(3);
   if (!key && e.code.startsWith('Digit')) key = e.code.slice(5);
+  if (!key && /^F\d+$/.test(e.code)) key = e.code;
   if (!key) return '';
   return (e.ctrlKey || e.metaKey ? 'Ctrl+' : '') + (e.shiftKey ? 'Shift+' : '') + (e.altKey ? 'Alt+' : '') + key;
 }

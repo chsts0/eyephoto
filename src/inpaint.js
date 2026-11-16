@@ -165,4 +165,15 @@ async function warm(userData) {
   }
 }
 
-module.exports = { status, download, run, warm, SIZE };
+// «Считать на процессоре» из настроек: видеокарту больше не трогаем
+function setCpu(on) {
+  if (on && !gpuFailed) { gpuFailed = true; session = null; }
+  if (!on && gpuFailed && !process.env.EYEPHOTO_CPU) { gpuFailed = false; session = null; }
+}
+
+async function remove(userData) {
+  session = null;
+  await fsp.rm(modelPath(userData), { force: true });
+}
+
+module.exports = { status, download, run, warm, setCpu, remove, SIZE };

@@ -6,6 +6,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const inpaint = require('./inpaint');
+const assistant = require('./assistant');
 
 let win;
 
@@ -87,7 +88,7 @@ function send(channel, payload) {
 // Прога сама проверяет релизы на гитхабе, качает новую версию в фоне
 // и ставит её при следующем закрытии. Статус уходит в интерфейс.
 
-function setupUpdater() {
+function setupUpdater(auto = true) {
   const status = (state, info = {}) => send('update-status', { state, ...info });
   if (!app.isPackaged) {
     status('dev');
@@ -107,9 +108,9 @@ function setupUpdater() {
   autoUpdater.on('error', (e) => status('error', { message: String(e && e.message ? e.message : e) }));
 
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
-  check();
+  if (auto) check(); else status('off');
   // Прогу могут не закрывать сутками, поэтому проверяем ещё и раз в час.
-  setInterval(check, 60 * 60 * 1000);
+  if (auto) setInterval(check, 60 * 60 * 1000);
 
   ipcMain.handle('update-check', check);
   ipcMain.handle('update-install', () => autoUpdater.quitAndInstall(true, true));
@@ -406,13 +407,30 @@ ipcMain.handle('model-download', async () => {
 });
 ipcMain.handle('inpaint', (_e, { rgba, mask }) => inpaint.run(app.getPath('userData'), rgba, mask));
 
+// помощник по программе
+ipcMain.handle('assistant-status', () => assistant.status(app.getPath('userData')));
+ipcMain.handle('assistant-download', (e) => assistant.download(app.getPath('userData'), (p) => e.sender.send('assistant-progress', p)));
+ipcMain.handle('assistant-remove', () => assistant.remove(app.getPath('userData')));
+ipcMain.handle('assistant-reset', () => assistant.reset(app.getPath('userData')));
+ipcMain.handle('assistant-ask', (e, { id, question }) => assistant.ask(app.getPath('userData'), question, (t) => e.sender.send('assistant-chunk', { id, t })));
+
+// настройки окна и нейронки из окна «Настройки»
+ipcMain.handle('set-zoom', (_e, f) => { if (win && f >= 0.7 && f <= 1.6) win.webContents.setZoomFactor(f); });
+ipcMain.handle('set-neural-device', (_e, cpu) => inpaint.setCpu(!!cpu));
+ipcMain.handle('model-remove', () => inpaint.remove(app.getPath('userData')));
+
 app.whenReady().then(() => {
   serveApp();
   createWindow();
-  win.webContents.once('did-finish-load', () => {
-    setupUpdater();
+  win.webContents.once('did-finish-load', async () => {
+    const st = await loadSettings();
+    const pr = st.prefs || {};
+    if (pr.uiScale) win.webContents.setZoomFactor(pr.uiScale);
+    if (pr.neuralCpu) inpaint.setCpu(true);
+    setupUpdater(pr.autoUpdate !== false);
     inpaint.warm(app.getPath('userData'));
   });
 });
 
 app.on('window-all-closed', () => app.quit());
+app.on('will-quit', () => { assistant.unload(); });

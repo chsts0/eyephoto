@@ -3,7 +3,8 @@
 import * as im from './imaging.js';
 
 let nextId = 1;
-const HISTORY_LIMIT = 60;
+let HISTORY_LIMIT = 60;
+export const setHistoryLimit = (n) => { HISTORY_LIMIT = Math.max(20, Math.min(300, n | 0)); };
 
 // Слой хранит свои пиксели в исходном разрешении, а положение, масштаб и поворот
 // отдельно. Поэтому глаз можно сколько угодно двигать и менять в размере
@@ -39,10 +40,10 @@ export function makeDoc({ name, w, h, dpi = im.DPI, background = true }) {
     changed: false,
     counter: 1,
   };
-  if (background) {
+  if (background && background !== 'none') {
     const c = im.makeCanvas(w, h);
     const x = c.getContext('2d');
-    x.fillStyle = '#000';
+    x.fillStyle = background === 'white' ? '#fff' : '#000';
     x.fillRect(0, 0, w, h);
     doc.layers.push(makeLayer({ name: 'Фон', canvas: c, cx: w / 2, cy: h / 2, locked: true }));
   }

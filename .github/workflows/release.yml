@@ -56,9 +56,38 @@ jobs:
             rm lama_fp32.onnx
           fi
 
+      # Модель помощника (2 ГБ) тоже кладём в свой релиз, разрезав на две части:
+      # GitHub не берёт файлы больше 2 ГБ. Программа сначала качает с Hugging Face.
+      - name: Выложить модель помощника, если её ещё нет
+        shell: bash
+        run: |
+          if ! gh release view models-llm-v1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            F=qwen2.5-3b-instruct-q4_k_m.gguf
+            curl -fL --retry 3 -o "$F" "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/$F"
+            head -c 1100000000 "$F" > "$F.part1"
+            tail -c +1100000001 "$F" > "$F.part2"
+            gh release create models-llm-v1 "$F.part1" "$F.part2" \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Модель помощника" \
+              --notes "Qwen2.5 3B для помощника по программе. Не удалять: её скачивают установленные программы."
+            rm -f "$F" "$F.part1" "$F.part2"
+          fi
+
       - name: Установить зависимости
         if: steps.ver.outputs.exists == 'false'
         run: npm ci
+
+      # Движок помощника: готовая сборка llama.cpp с поддержкой видеокарт (Vulkan),
+      # без видеокарты сама работает на процессоре. Кладётся рядом с программой.
+      - name: Скачать движок помощника
+        if: steps.ver.outputs.exists == 'false'
+        shell: bash
+        run: |
+          T=$(gh release view --repo ggml-org/llama.cpp --json tagName -q .tagName)
+          gh release download "$T" --repo ggml-org/llama.cpp -p "llama-$T-bin-win-vulkan-x64.zip" -O llama.zip
+          mkdir -p tmp-llama vendor/llama && unzip -q llama.zip -d tmp-llama
+          cp -r "$(dirname "$(find tmp-llama -name llama-server.exe | head -1)")"/. vendor/llama/
+          ls vendor/llama | head -40
 
       - name: Собрать установщик
         if: steps.ver.outputs.exists == 'false'
@@ -99,6 +128,14 @@ jobs:
 
       - name: Установить зависимости
         run: npm ci
+
+      - name: Скачать движок помощника
+        run: |
+          T=$(gh release view --repo ggml-org/llama.cpp --json tagName -q .tagName)
+          gh release download "$T" --repo ggml-org/llama.cpp -p "llama-$T-bin-macos-arm64.zip" -O llama.zip
+          mkdir -p tmp-llama vendor/llama && unzip -q llama.zip -d tmp-llama
+          cp -R "$(dirname "$(find tmp-llama -name llama-server -type f | head -1)")"/. vendor/llama/
+          ls vendor/llama | head -40
 
       - name: Собрать под мак
         run: npx electron-builder --mac --publish never

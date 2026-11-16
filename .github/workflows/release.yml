@@ -84,10 +84,17 @@ jobs:
         shell: bash
         run: |
           T=$(gh release view --repo ggml-org/llama.cpp --json tagName -q .tagName)
-          gh release download "$T" --repo ggml-org/llama.cpp -p "llama-$T-bin-win-vulkan-x64.zip" -O llama.zip
-          mkdir -p tmp-llama vendor/llama && unzip -q llama.zip -d tmp-llama
+          gh release view "$T" --repo ggml-org/llama.cpp --json assets -q '.assets[].name' > assets.txt
+          cat assets.txt
+          # сборка с Vulkan под 64-битную винду, если нет — обычная для процессора
+          A=$(grep -iE '(win|windows).*vulkan.*(x64|amd64).*\.(zip|tar\.gz)$' assets.txt | head -1)
+          [ -n "$A" ] || A=$(grep -iE '(win|windows).*(cpu|avx2).*(x64|amd64).*\.(zip|tar\.gz)$' assets.txt | head -1)
+          echo "беру $A"
+          gh release download "$T" --repo ggml-org/llama.cpp -p "$A" -O "llama-pkg"
+          mkdir -p tmp-llama vendor/llama
+          case "$A" in *.zip) unzip -q llama-pkg -d tmp-llama ;; *) tar xzf llama-pkg -C tmp-llama ;; esac
           cp -r "$(dirname "$(find tmp-llama -name llama-server.exe | head -1)")"/. vendor/llama/
-          ls vendor/llama | head -40
+          ls vendor/llama
 
       - name: Собрать установщик
         if: steps.ver.outputs.exists == 'false'
@@ -132,10 +139,14 @@ jobs:
       - name: Скачать движок помощника
         run: |
           T=$(gh release view --repo ggml-org/llama.cpp --json tagName -q .tagName)
-          gh release download "$T" --repo ggml-org/llama.cpp -p "llama-$T-bin-macos-arm64.zip" -O llama.zip
-          mkdir -p tmp-llama vendor/llama && unzip -q llama.zip -d tmp-llama
+          gh release view "$T" --repo ggml-org/llama.cpp --json assets -q '.assets[].name' > assets.txt
+          A=$(grep -iE '(mac|macos|darwin).*arm64.*\.(zip|tar\.gz)$' assets.txt | grep -viE 'xcframework|ios' | head -1)
+          echo "беру $A"
+          gh release download "$T" --repo ggml-org/llama.cpp -p "$A" -O "llama-pkg"
+          mkdir -p tmp-llama vendor/llama
+          case "$A" in *.zip) unzip -q llama-pkg -d tmp-llama ;; *) tar xzf llama-pkg -C tmp-llama ;; esac
           cp -R "$(dirname "$(find tmp-llama -name llama-server -type f | head -1)")"/. vendor/llama/
-          ls vendor/llama | head -40
+          ls vendor/llama
 
       - name: Собрать под мак
         run: npx electron-builder --mac --publish never

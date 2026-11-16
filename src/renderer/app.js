@@ -443,21 +443,34 @@ function refreshTabs() {
 
 // --- Открытие файлов --------------------------------------------------------
 
+const RAW_TONE = (() => {
+  const X = [0, 6, 18, 30, 48, 72, 96, 120, 144, 162, 175, 195, 215, 235, 255];
+  const Y = [8, 15, 27, 38, 60, 90, 122, 150, 176, 195, 207, 222, 235, 244, 250];
+  const t = new Uint8Array(256);
+  for (let v = 0, k = 0; v < 256; v++) {
+    while (X[k + 1] < v) k++;
+    t[v] = Math.round(Y[k] + (Y[k + 1] - Y[k]) * (v - X[k]) / (X[k + 1] - X[k]));
+  }
+  return t;
+})();
+
 async function decodeRaw(bytes) {
   const { default: LibRaw } = await import('/libraw/index.js');
   const raw = new LibRaw();
   try {
     // Автояркость выключена: иначе два глаза одного клиента проявлялись бы по-разному.
-    // Множитель 4 даёт ту же яркость, что Camera Raw с экспозицией около нуля.
+    // Множитель 2 оставляет запас в светах, дальше кривая как у Camera Raw по умолчанию
+    // (подобрана по одному и тому же снимку из фотошопа и отсюда): чуть приподнятые
+    // тени, мягкое плечо в светах, белок и блики не выбиваются в чистый белый.
     await raw.open(new Uint8Array(bytes), {
-      useCameraWb: true, outputBps: 8, userQual: 3, noAutoBright: true, bright: 4,
+      useCameraWb: true, outputBps: 8, userQual: 3, noAutoBright: true, bright: 2,
     });
     const out = await raw.imageData();
     const { width: w, height: h, data } = out;
     const ch = Math.round(data.length / (w * h));
     const img = new ImageData(w, h), d = img.data;
     for (let i = 0, j = 0; i < d.length; i += 4, j += ch) {
-      d[i] = data[j]; d[i + 1] = data[j + 1]; d[i + 2] = data[j + 2]; d[i + 3] = 255;
+      d[i] = RAW_TONE[data[j]]; d[i + 1] = RAW_TONE[data[j + 1]]; d[i + 2] = RAW_TONE[data[j + 2]]; d[i + 3] = 255;
     }
     const c = im.makeCanvas(w, h);
     c.getContext('2d').putImageData(img, 0, 0);

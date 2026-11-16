@@ -46,7 +46,11 @@ export function cloneCanvas(src) {
 // Радиусы размытия в пикселях исходника и сила двух слоёв резкости.
 // Подобрано так, чтобы «Детали 100» давали вид, близкий к Camera Raw
 // с текстурой 100 и резкостью 150, которыми студия пользовалась в фотошопе.
-const FINE_PX = 3, COARSE_PX = 12.5, A_FINE = 1.3, A_COARSE = 1.4;
+// Подобрано по снимку из Camera Raw с резкостью 150 и текстурой 100:
+// средний рисунок там примерно в 1,8 раза сильнее исходного, мелкий около 2,2.
+// Сильные перепады (край зрачка, ресницы) приглушаются, чтобы не было ореолов,
+// как это делает «Детализация» в Camera Raw.
+const FINE_PX = 3, COARSE_PX = 12.5, A_FINE = 0.5, A_COARSE = 0.8, HALO = 48;
 
 const toLin = (v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
 const toSrgb = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
@@ -132,7 +136,8 @@ export function applyAdjust(src, p0, scale = 1, blurScale = scale) {
     let add = L0 - Lf;
     if (coarse) {
       const Lc = 0.299 * coarse[i] + 0.587 * coarse[i + 1] + 0.114 * coarse[i + 2];
-      add += a * (A_FINE * (L0 - Lf) + A_COARSE * (L0 - Lc));
+      const hp = A_FINE * (L0 - Lf) + A_COARSE * (L0 - Lc);
+      add += a * hp / (1 + Math.abs(hp) / HALO);
     }
     let r = lr[clamp(fine[i] + add)], g = lg[clamp(fine[i + 1] + add)], b = lb[clamp(fine[i + 2] + add)];
     // светлые и тени: двигаем яркость в своём диапазоне, цвет не трогаем

@@ -14,6 +14,7 @@
 import csv
 import datetime
 import os
+import socket
 import sys
 import threading
 import zipfile
@@ -199,7 +200,9 @@ def collect(src, dst, log=print, progress=lambda i, n: None, stop=lambda: False,
         wr.writerows(r for n, r in sorted(last.items()) if n in names)
     log(f'Глаз собрано: {len(names)}. Повторов отброшено: {dupes}, мелких: {skipped_small}, сильно обрезанных: {skipped_cut}.')
     stamp = datetime.date.today().isoformat()
-    zpath = os.path.join(dst, f'eyes_dataset_{stamp}.zip')
+    # имя компьютера в названии: архивы с разных компов не перепутаются и не перезапишут друг друга
+    pc = ''.join(ch for ch in socket.gethostname() if ch.isalnum() or ch in '-_')[:24] or 'pc'
+    zpath = os.path.join(dst, f'eyes_dataset_{pc}_{stamp}.zip')
     log('Складываю в архив…')
     with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_STORED) as z:      # JPEG и так сжаты
         z.write(os.path.join(dst, 'eyes.csv'), 'eyes.csv')

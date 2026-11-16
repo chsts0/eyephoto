@@ -18,7 +18,7 @@
 
 1. Зарегистрироваться на kaggle.com и подтвердить телефон (без этого не дают
    видеокарту и интернет в блокноте).
-2. Datasets → New Dataset → загрузить `eyes_dataset_ДАТА.zip`, видимость **Private**.
+2. Datasets → New Dataset → загрузить `eyes_dataset_…zip`, видимость **Private**. Если фото на нескольких компах, запустить сборщик на каждом и загрузить все архивы в один датасет: повторы между ними обучение уберёт само.
 3. Code → New Notebook → File → Import Notebook → `training/eyephoto_train.ipynb`.
 4. Справа: Accelerator — GPU T4 x2 (или P100), Internet — On.
    Add Input → свой датасет.

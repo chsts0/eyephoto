@@ -55,6 +55,27 @@ def find_eyes(root):
     return out
 
 
+def dedupe(items):
+    """Архивы с разных компов могут содержать один и тот же глаз: оставляем один,
+    иначе он попадёт и в обучение, и в проверку."""
+    kept, prints = [], []
+    for img_p, msk_p in items:
+        g = read(img_p, cv2.IMREAD_GRAYSCALE)
+        if g is None:
+            continue
+        c = g.shape[0] // 2
+        h = g.shape[0] * 300 // 1024
+        t = cv2.resize(g[c - h:c + h, c - h:c + h].astype(np.float32), (9, 8), interpolation=cv2.INTER_AREA)
+        fp = (t[:, 1:] > t[:, :-1]).flatten()
+        if any((fp != q).sum() <= 6 for q in prints):
+            continue
+        prints.append(fp)
+        kept.append((img_p, msk_p))
+    if len(kept) < len(items):
+        print(f'Повторов между архивами: {len(items) - len(kept)}', flush=True)
+    return kept
+
+
 def read(path, flag=cv2.IMREAD_COLOR):
     return cv2.imdecode(np.fromfile(path, np.uint8), flag)
 
@@ -294,7 +315,7 @@ def main():
         export_onnx(gen, os.path.join(a.out, 'eyes_lama.onnx'))
         return
 
-    items = find_eyes(a.data)
+    items = dedupe(find_eyes(a.data))
     rnd = random.Random(7)
     rnd.shuffle(items)
     n_val = max(4, len(items) // 20)

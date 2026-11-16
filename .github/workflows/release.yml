@@ -83,13 +83,17 @@ jobs:
         if: steps.ver.outputs.exists == 'false'
         shell: bash
         run: |
-          T=$(gh release view --repo ggml-org/llama.cpp --json tagName -q .tagName)
-          gh release view "$T" --repo ggml-org/llama.cpp --json assets -q '.assets[].name' > assets.txt
-          cat assets.txt
-          # сборка с Vulkan под 64-битную винду, если нет — обычная для процессора
-          A=$(grep -iE '(win|windows).*vulkan.*(x64|amd64).*\.(zip|tar\.gz)$' assets.txt | head -1)
-          [ -n "$A" ] || A=$(grep -iE '(win|windows).*(cpu|avx2).*(x64|amd64).*\.(zip|tar\.gz)$' assets.txt | head -1)
-          echo "беру $A"
+          # «последний» релиз у llama.cpp бывает служебным, без сборок: ищем свежий со сборкой
+          A=""
+          for T in $(gh release list --repo ggml-org/llama.cpp --limit 30 --json tagName -q '.[].tagName'); do
+            gh release view "$T" --repo ggml-org/llama.cpp --json assets -q '.assets[].name' > assets.txt
+            # сборка с Vulkan под 64-битную винду, если нет — обычная для процессора
+            A=$(grep -iE '(win|windows).*vulkan.*(x64|amd64).*\.(zip|tar\.gz)$' assets.txt | head -1 || true)
+            [ -n "$A" ] || A=$(grep -iE '(win|windows).*(cpu|avx2).*(x64|amd64).*\.(zip|tar\.gz)$' assets.txt | head -1 || true)
+            [ -n "$A" ] && break
+          done
+          [ -n "$A" ] || { echo "сборка llama.cpp не найдена"; exit 1; }
+          echo "беру $T $A"
           gh release download "$T" --repo ggml-org/llama.cpp -p "$A" -O "llama-pkg"
           mkdir -p tmp-llama vendor/llama
           case "$A" in *.zip) unzip -q llama-pkg -d tmp-llama ;; *) tar xzf llama-pkg -C tmp-llama ;; esac
@@ -138,10 +142,14 @@ jobs:
 
       - name: Скачать движок помощника
         run: |
-          T=$(gh release view --repo ggml-org/llama.cpp --json tagName -q .tagName)
-          gh release view "$T" --repo ggml-org/llama.cpp --json assets -q '.assets[].name' > assets.txt
-          A=$(grep -iE '(mac|macos|darwin).*arm64.*\.(zip|tar\.gz)$' assets.txt | grep -viE 'xcframework|ios' | head -1)
-          echo "беру $A"
+          A=""
+          for T in $(gh release list --repo ggml-org/llama.cpp --limit 30 --json tagName -q '.[].tagName'); do
+            gh release view "$T" --repo ggml-org/llama.cpp --json assets -q '.assets[].name' > assets.txt
+            A=$(grep -iE '(mac|macos|darwin).*arm64.*\.(zip|tar\.gz)$' assets.txt | grep -viE 'xcframework|ios' | head -1 || true)
+            [ -n "$A" ] && break
+          done
+          [ -n "$A" ] || { echo "сборка llama.cpp не найдена"; exit 1; }
+          echo "беру $T $A"
           gh release download "$T" --repo ggml-org/llama.cpp -p "$A" -O "llama-pkg"
           mkdir -p tmp-llama vendor/llama
           case "$A" in *.zip) unzip -q llama-pkg -d tmp-llama ;; *) tar xzf llama-pkg -C tmp-llama ;; esac

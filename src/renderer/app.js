@@ -1493,15 +1493,16 @@ async function openTemplate(item) {
   refresh(); fit();
 }
 
-// --- Дизайны листа -----------------------------------------------------------
-// Панель с готовыми дизайнами из каталога. Миниатюры собираются из глаз
-// текущего листа. Клик открывает новый лист с дизайном, сверху плашка
-// с переключателями: дизайн, фон, сколько глаз, раскладка, россыпь.
+// --- Дизайны: своё пространство ----------------------------------------------
+// Режим «Дизайны» на весь экран: слева галерея дизайнов из каталога (превью
+// сразу на глазах текущего листа), по центру крупно выбранный, справа
+// настройки. Готовое можно сразу сохранить JPEG или открыть слоями и доделать
+// инструментами. С листа дизайна можно вернуться сюда.
 
 const designEyesOf = (d) => (d ? (d.designEyes && d.designEyes.length ? d.designEyes : templateEyes(d)) : []);
 const eyesSig = (eyes) => eyes.map((e) => `${e.eyeKey || e.name}:${e.canvas.width}`).join('|');
 const thumbCache = new Map();
-let designSig = '';
+const FMT_KEYS = Object.keys(im.FORMATS);
 
 function smallEye(e, size) {
   const k = Math.min(1, size / Math.max(e.canvas.width, e.canvas.height));
@@ -1513,174 +1514,238 @@ function smallEye(e, size) {
   return { ...e, canvas: c, adjust: null };
 }
 
-async function renderDesign(opts, eyes, w, h) {
-  const { layers } = await DS.build(opts, eyes, w, h, { thumb: true });
+async function renderDesign(opts, eyes, w, h, thumb = true) {
+  const { layers, opts: o } = await DS.build(opts, eyes, w, h, { thumb });
   const doc = D.makeDoc({ name: 'превью', w, h });
   doc.layers.push(...layers.map((p) => D.makeLayer(p)));
   const c = im.makeCanvas(w, h), x = c.getContext('2d');
   x.imageSmoothingQuality = 'high';
   D.composite(x, doc, { full: true });
+  c.opts = o;
   return c;
 }
 
-function refreshDesigns() {
-  const panel = $('designPanel'), box = $('designBtns');
-  const eyes = designEyesOf(S.cur);
-  panel.hidden = !eyes.length;
-  if (!eyes.length) { designSig = ''; return; }
-  const sig = eyesSig(eyes);
-  if (sig === designSig && box.childElementCount) { markDesign(); return; }
-  designSig = sig;
+// Полный лист дизайна (для сохранения и открытия слоями)
+async function buildDesignDoc(ds) {
+  const f = im.FORMATS[ds.fmt] || im.FORMATS.A4;
+  const preset = DS.PRESETS.find((p) => p.id === ds.preset);
+  const doc = D.makeDoc({ name: `Дизайн ${(preset ? preset.name : 'свой').toLowerCase()}`, w: f.w, h: f.h });
+  const { layers, opts } = await DS.build(ds.opts, ds.eyes, doc.w, doc.h);
+  doc.layers.push(...layers.map((p) => D.makeLayer(p)));
+  doc.design = { preset: ds.preset, opts };
+  doc.designEyes = ds.eyes.map(cloneEye);
+  doc.srcDoc = ds.src && S.docs.includes(ds.src) ? ds.src : null;
+  return doc;
+}
+
+const inDesigns = () => document.body.classList.contains('designs');
+
+// Войти в пространство дизайнов. from — лист, с которого пришли: его глаза
+// (а если это лист дизайна, то и его настройки) берутся за основу.
+function enterDesigns(from = S.cur) {
+  const src = from && from.design && from.srcDoc && S.docs.includes(from.srcDoc) ? from.srcDoc : from;
+  const eyes = designEyesOf(from).map(cloneEye);
+  const fmt = from && from.design ? (FMT_KEYS.find((k) => im.FORMATS[k] === im.matchFormat(from.w, from.h)) || 'A4')
+    : (from && FMT_KEYS.find((k) => im.FORMATS[k] === im.matchFormat(from.w, from.h))) || 'A4';
+  const preset = from && from.design ? from.design.preset : (S.ds && S.ds.preset) || DS.PRESETS[0].id;
+  const base = from && from.design ? from.design.opts : (DS.PRESETS.find((p) => p.id === preset) || DS.PRESETS[0]).opts;
+  S.ds = { src, from, eyes, small: eyes.map((e) => smallEye(e, 1100)), tiny: eyes.map((e) => smallEye(e, 220)), preset, fmt, opts: DS.normalize(base, eyes.length) };
+  document.body.classList.add('designs');
+  refreshModeSwitch();
+  renderGallery();
+  renderDesignSide();
+  renderDesignPreview();
+}
+
+function leaveDesigns() {
+  document.body.classList.remove('designs');
+  refreshModeSwitch();
+  requestAnimationFrame(() => { resize(); if (S.cur) fit(); });
+}
+
+function refreshModeSwitch() {
+  const on = inDesigns();
+  document.querySelectorAll('.mode-switch button').forEach((b) => b.classList.toggle('on', (b.dataset.mode === 'designs') === on));
+}
+
+function renderGallery() {
+  const box = $('dsGallery'), ds = S.ds;
   box.textContent = '';
-  const small = eyes.map((e) => smallEye(e, 220));
-  const grid = ui.el('div', 'design-grid');
+  box.appendChild(ui.el('div', 'ds-title', 'Дизайны'));
+  if (!ds.eyes.length) return;
+  const sig = eyesSig(ds.eyes);
+  const grid = ui.el('div', 'ds-grid');
   for (const p of DS.PRESETS) {
-    const o = DS.normalize(p.opts, eyes.length);
-    const b = ui.el('button', 'design-card');
-    b.dataset.id = p.id;
-    b.title = `${p.name}: открыть лист с этим дизайном`;
-    const pic = ui.el('div', 'design-pic');
+    const o = DS.normalize(p.opts, ds.eyes.length);
+    if (p.opts.design && p.opts.design !== 'eyes' && o.design !== p.opts.design) continue;   // не хватает глаз
+    const b = ui.el('button', 'ds-card' + (p.id === ds.preset ? ' on' : ''));
+    const pic = ui.el('div', 'ds-pic');
     b.append(pic, ui.el('span', '', p.name));
-    // дизайн, которому не хватает глаз (половинки из одного глаза), не показываем
-    if (p.opts.design && p.opts.design !== 'eyes' && o.design !== p.opts.design) continue;
-    b.onclick = () => openDesign(p);
+    b.onclick = () => {
+      ds.preset = p.id;
+      ds.opts = DS.normalize(p.opts, ds.eyes.length);
+      box.querySelectorAll('.ds-card').forEach((x) => x.classList.toggle('on', x === b));
+      renderDesignSide(); renderDesignPreview();
+    };
     grid.appendChild(b);
     const key = sig + '#' + p.id;
-    const put = (c) => { pic.textContent = ''; pic.appendChild(c); };
-    if (thumbCache.has(key)) put(thumbCache.get(key));
-    else {
-      renderDesign(o, small, 240, 170).then((c) => { thumbCache.set(key, c); if (thumbCache.size > 60) thumbCache.delete(thumbCache.keys().next().value); put(c); })
-        .catch((e) => console.error(e));
-    }
+    if (thumbCache.has(key)) pic.appendChild(thumbCache.get(key));
+    else renderDesign(o, ds.tiny, 280, 198).then((c) => { thumbCache.set(key, c); if (thumbCache.size > 60) thumbCache.delete(thumbCache.keys().next().value); pic.appendChild(c); }).catch(console.error);
   }
   box.appendChild(grid);
-  markDesign();
-}
-function markDesign() {
-  const id = S.cur && S.cur.design && S.cur.design.preset;
-  $('designBtns').querySelectorAll('.design-card').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
 }
 
-async function openDesign(preset) {
-  if (S.busy) return;
-  const src = S.cur, eyes = designEyesOf(src).map(cloneEye);
-  if (!eyes.length) return;
-  const open = S.docs.find((d) => d.design && d.design.preset === preset.id && sameEyes(d.designEyes || [], eyes));
-  if (open) { switchDoc(open); refresh(); return; }
-  const f = (src && im.matchFormat(src.w, src.h)) || im.FORMATS.A4;
-  const doc = D.makeDoc({ name: `Дизайн ${preset.name.toLowerCase()}`, w: f.w, h: f.h });
-  doc.design = { preset: preset.id, opts: DS.normalize(preset.opts, eyes.length) };
-  doc.designEyes = eyes;
-  doc.srcDoc = src && (src.srcDoc && S.docs.includes(src.srcDoc) && !eyeSources(src).length ? src.srcDoc : src);
-  await setBusy('Собираю дизайн');
-  try {
-    const { layers, opts } = await DS.build(doc.design.opts, eyes, doc.w, doc.h);
-    doc.design.opts = opts;
-    doc.layers.push(...layers.map((p) => D.makeLayer(p)));
-  } catch (e) {
-    console.error(e);
-    setBusy('');
-    await ui.tell('Не получилось собрать дизайн', String(e.message || e));
+let previewJob = 0;
+async function renderDesignPreview() {
+  const ds = S.ds, view = $('dsView'), empty = $('dsEmpty');
+  empty.hidden = !!ds.eyes.length;
+  $('dsSave').disabled = $('dsOpen').disabled = !ds.eyes.length;
+  if (!ds.eyes.length) {
+    empty.textContent = 'Сначала вырежьте глаза на листе: кругом по снимку и «Вырезать глаз на новый слой». Потом возвращайтесь сюда.';
+    view.querySelector('canvas') && view.querySelector('canvas').remove();
     return;
   }
-  setBusy('');
-  doc.changed = true;
-  addDoc(doc);
-  refresh(); fit();
-}
-
-// Пересобрать дизайн с новыми настройками. Правки слоёв дизайна при этом
-// заменяются, поэтому это одна запись в истории: отменяется Ctrl+Z.
-async function applyDesign(change, label) {
-  const doc = S.cur;
-  if (!doc || !doc.design || S.busy) return;
-  const opts = DS.normalize({ ...doc.design.opts, ...change }, doc.designEyes.length);
-  let fmt = null;
-  if (change.fmt) {
-    fmt = im.FORMATS[change.fmt];
-    delete opts.fmt;
-  }
-  await setBusy('Собираю дизайн');
+  const job = ++previewJob;
+  view.classList.add('busy');
+  const f = im.FORMATS[ds.fmt];
+  const W = 1600, H = Math.round(W * f.h / f.w);
   try {
-    const w = fmt ? fmt.w : doc.w, h = fmt ? fmt.h : doc.h;
-    const { layers, opts: o } = await DS.build(opts, doc.designEyes, w, h);
-    const bg = doc.layers.find((l) => l.name === 'Фон' && l.locked && l.kind === 'pixel');
-    if (fmt) {
-      // другой формат: новый размер листа, история прежнего размера не подходит
-      doc.w = w; doc.h = h;
-      const c = im.makeCanvas(w, h), x = c.getContext('2d');
-      x.fillStyle = '#000'; x.fillRect(0, 0, w, h);
-      doc.layers = [D.makeLayer({ name: 'Фон', canvas: c, cx: w / 2, cy: h / 2, locked: true }), ...layers.map((p) => D.makeLayer(p))];
-      doc.undo = []; doc.redo = []; doc.sel = null; doc.active = [];
-      doc.changed = true;
-    } else {
-      D.structEdit(doc, label || 'Дизайн', () => {
-        doc.layers = [...(bg ? [bg] : []), ...layers.map((p) => D.makeLayer(p))];
-        doc.active = [];
-      });
-    }
-    doc.design.opts = o;
-  } catch (e) {
-    console.error(e);
-    ui.toast('Не получилось собрать дизайн');
-  }
-  setBusy('');
-  refresh(); requestDraw();
-  if (fmt) fit();
+    const c = await renderDesign(ds.opts, ds.small, W, H, false);
+    if (job !== previewJob) return;
+    ds.opts = c.opts;
+    const old = view.querySelector('canvas');
+    if (old) old.replaceWith(c); else view.appendChild(c);
+  } catch (e) { console.error(e); ui.toast('Не получилось собрать дизайн'); }
+  if (job === previewJob) view.classList.remove('busy');
 }
 
-function refreshDesignBar() {
-  const bar = $('designbar'), d = S.cur;
-  const was = bar.hidden;
-  bar.hidden = !(d && d.design);
-  // в дизайне раскладка листа не нужна: места глаз задаёт сам дизайн
-  $('actionsPanel').hidden = !!(d && d.design);
-  if (was !== bar.hidden) requestAnimationFrame(() => { resize(); if (S.cur) fit(); });
-  if (bar.hidden) return;
-  const o = d.design.opts, n = d.designEyes.length, ok = DS.allowed(o, n);
-  bar.textContent = '';
-  const seg = (title, items, cur, key, allow) => {
-    const g = ui.el('div', 'db-group');
-    g.appendChild(ui.el('span', 'db-label', title));
-    const s = ui.el('div', 'db-seg');
+function changeDesign(patch) {
+  const ds = S.ds;
+  if (patch.fmt) { ds.fmt = patch.fmt; delete patch.fmt; }
+  ds.opts = DS.normalize({ ...ds.opts, ...patch }, ds.eyes.length);
+  renderDesignSide();
+  renderDesignPreview();
+}
+
+function renderDesignSide() {
+  const box = $('dsSide'), ds = S.ds, o = ds.opts, n = ds.eyes.length, ok = DS.allowed(o, n);
+  box.textContent = '';
+  if (!n) return;
+  const group = (title, items, cur, key, allow) => {
+    const g = ui.el('div', 'ds-group');
+    g.appendChild(ui.el('div', 'ds-label', title));
+    const s = ui.el('div', 'ds-opts');
     for (const [v, label, tip] of items) {
       const b = ui.el('button', String(cur) === String(v) ? 'on' : '', label);
       if (tip) b.title = tip;
       b.disabled = allow ? !allow[v] : false;
-      b.onclick = () => { if (String(cur) !== String(v)) applyDesign({ [key]: v }, `${title}: ${label}`); };
+      b.onclick = () => { if (String(cur) !== String(v)) changeDesign({ [key]: v }); };
       s.appendChild(b);
     }
     g.appendChild(s);
-    bar.appendChild(g);
+    box.appendChild(g);
   };
-  seg('Дизайн', Object.entries(DS.DESIGN_NAMES), o.design, 'design', ok.design);
-  seg('Фон', Object.entries(DS.BG_NAMES), o.bg, 'bg', ok.bg);
+  group('Дизайн', Object.entries(DS.DESIGN_NAMES), o.design, 'design', ok.design);
+  group('Фон', Object.entries(DS.BG_NAMES), o.bg, 'bg', ok.bg);
   if (o.design === 'eyes') {
-    seg('Глаз', [[1, '1'], [2, '2'], [3, '3', 'Треугольником, только на чёрном и граффити']], o.count, 'count', ok.count);
-    if (o.count === 2) seg('Раскладка', [['whole', 'Целые'], ['corners', 'Углы']], o.place, 'place', ok.place);
+    group('Глаз', [[1, '1'], [2, '2'], [3, '3', 'Треугольником, только на чёрном и граффити']], o.count, 'count', ok.count);
+    if (o.count === 2) group('Раскладка', [['whole', 'Целые'], ['corners', 'Углы']], o.place, 'place', ok.place);
   }
-  if (o.design === 'halves') seg('Разрез', [['v', 'Вертикально'], ['h', 'Горизонтально']], o.split, 'split');
-  const f = im.matchFormat(d.w, d.h);
-  seg('Формат', Object.entries(im.FORMATS).map(([k, v]) => [k, v.label]), f ? Object.keys(im.FORMATS).find((k) => im.FORMATS[k] === f) : '', 'fmt');
-  const acts = ui.el('div', 'db-group');
+  if (o.design === 'halves') group('Разрез', [['v', 'Вертикальный'], ['h', 'Горизонтальный']], o.split, 'split');
+  group('Формат', FMT_KEYS.map((k) => [k, im.FORMATS[k].label]), ds.fmt, 'fmt');
+  const g = ui.el('div', 'ds-group');
+  g.appendChild(ui.el('div', 'ds-label', 'Ещё'));
+  const s = ui.el('div', 'ds-opts ds-col');
   if (o.design !== 'collision') {
-    const t = ui.el('button', 'db-btn' + (o.scatter ? ' on' : ''), 'Россыпь');
-    t.title = 'Края глаз рассыпаются пылью цвета глаза';
-    t.onclick = () => applyDesign({ scatter: !o.scatter }, o.scatter ? 'Убрать россыпь' : 'Россыпь');
-    acts.appendChild(t);
+    const t = ui.el('button', o.scatter ? 'on' : '', 'Россыпь по краям');
+    t.onclick = () => changeDesign({ scatter: !o.scatter });
+    s.appendChild(t);
   }
   if (o.scatter) {
-    const r = ui.el('button', 'db-btn', 'Другая россыпь');
-    r.onclick = () => applyDesign({ seed: (o.seed || 1) + 1 + Math.floor(Math.random() * 1000) }, 'Другая россыпь');
-    acts.appendChild(r);
+    const r = ui.el('button', '', 'Другая россыпь');
+    r.onclick = () => changeDesign({ seed: (o.seed || 1) + 1 + Math.floor(Math.random() * 1000) });
+    s.appendChild(r);
   }
-  if (n > 1 && (o.design !== 'eyes' || o.count > 1 || n > 1)) {
-    const sw = ui.el('button', 'db-btn', 'Поменять глаза');
-    sw.onclick = () => applyDesign({ swap: !o.swap }, 'Поменять глаза');
-    acts.appendChild(sw);
+  if (n > 1) {
+    const sw = ui.el('button', '', 'Поменять глаза местами');
+    sw.onclick = () => changeDesign({ swap: !o.swap });
+    s.appendChild(sw);
   }
-  bar.appendChild(acts);
+  g.appendChild(s);
+  box.appendChild(g);
 }
+
+// Сохранить сразу JPEG с номером, без открытия листа
+async function saveDesign() {
+  if (S.busy || !S.ds.eyes.length) return;
+  await setBusy('Собираю дизайн');
+  let doc;
+  try { doc = await buildDesignDoc(S.ds); } catch (e) { console.error(e); setBusy(''); ui.toast('Не получилось собрать дизайн'); return; }
+  setBusy('');
+  await saveNumbered(doc);
+}
+
+// Открыть слоями и перейти к обычной работе
+async function openDesignDoc() {
+  if (S.busy || !S.ds.eyes.length) return;
+  const ds = S.ds;
+  // уже открыт такой же лист дизайна — пересобираем его, а не плодим вкладки
+  const same = ds.from && ds.from.design && S.docs.includes(ds.from) ? ds.from : null;
+  await setBusy('Собираю дизайн');
+  let doc;
+  try { doc = await buildDesignDoc(ds); } catch (e) { console.error(e); setBusy(''); ui.toast('Не получилось собрать дизайн'); return; }
+  setBusy('');
+  doc.changed = true;
+  if (same) {
+    D.structEdit(same, 'Дизайн', () => {
+      same.w = doc.w; same.h = doc.h;
+      same.layers = doc.layers; same.active = [];
+    });
+    if (same.w !== doc.w) { same.undo = []; same.redo = []; }
+    same.design = doc.design; same.name = doc.name; same.changed = true;
+    leaveDesigns();
+    switchDoc(same); refresh(); fit();
+    return;
+  }
+  leaveDesigns();
+  addDoc(doc);
+  refresh(); fit();
+}
+
+// На листе дизайна сверху тонкая строка: что за дизайн и кнопка назад в дизайны
+function refreshDesignBar() {
+  const bar = $('designbar'), d = S.cur;
+  const was = bar.hidden;
+  bar.hidden = !(d && d.design) || inDesigns();
+  // в дизайне раскладка листа не нужна: места глаз задаёт сам дизайн
+  $('actionsPanel').hidden = !!(d && d.design);
+  if (was !== bar.hidden) requestAnimationFrame(() => { resize(); if (S.cur) fit(); });
+  if (bar.hidden) return;
+  bar.textContent = '';
+  const o = d.design.opts, preset = DS.PRESETS.find((p) => p.id === d.design.preset);
+  const f = im.matchFormat(d.w, d.h);
+  const parts = [preset ? preset.name : DS.DESIGN_NAMES[o.design], DS.BG_NAMES[o.bg], f ? f.label : ''].filter(Boolean);
+  bar.appendChild(ui.el('span', 'db-info', 'Дизайн: ' + parts.join(' · ')));
+  const back = ui.el('button', 'db-btn', 'Изменить в дизайнах');
+  back.title = 'Вернуться в пространство дизайнов с этим листом';
+  back.onclick = () => enterDesigns(d);
+  bar.appendChild(back);
+}
+
+// Переключатель «Работа / Дизайны» рядом с кнопками справа сверху
+(() => {
+  const sw = ui.el('div', 'mode-switch');
+  for (const [mode, label] of [['work', 'Работа'], ['designs', 'Дизайны']]) {
+    const b = ui.el('button', mode === 'work' ? 'on' : '', label);
+    b.dataset.mode = mode;
+    b.onclick = () => { if (mode === 'designs') { if (!inDesigns()) enterDesigns(); } else if (inDesigns()) leaveDesigns(); };
+    sw.appendChild(b);
+  }
+  const right = document.querySelector('.menubar-right');
+  right.insertBefore(sw, right.firstChild);
+  $('dsSave').onclick = saveDesign;
+  $('dsOpen').onclick = openDesignDoc;
+})();
 
 // Шаблоны на панели раскладываются по разделам. Подписи короткие, полное имя
 // файла видно в подсказке.
@@ -1805,8 +1870,8 @@ async function askPrefix(current) {
   return v;
 }
 
-async function saveNumbered() {
-  const d = S.cur;
+async function saveNumbered(doc) {
+  const d = doc && doc.layers ? doc : S.cur;
   if (!d || S.busy) return;
   let { savePath, pointPrefix } = await api.settings();
   if (!pointPrefix) {
@@ -3234,12 +3299,11 @@ function refresh() {
   refreshActions();
   refreshCtx();
   refreshBack();
-  refreshDesigns();
   refreshDesignBar();
   syncMacMenu();
   const d = S.cur;
   $('saveBtn').disabled = $('placeBtn').disabled = false;
-  $('saveBtn').disabled = !d;
+  $('saveBtn').disabled = !d && !inDesigns();
   $('developBtn').disabled = !layer();
 }
 
@@ -3307,7 +3371,7 @@ const CMD = {
   newCustom: { label: 'Свой размер…', keys: 'Ctrl+Alt+N', run: () => customDoc() },
   open: { label: 'Открыть…', keys: 'Ctrl+O', run: () => openDialog('open') },
   place: { label: 'Поместить снимок…', keys: 'Ctrl+Shift+O', run: () => openDialog('place') },
-  save: { label: 'Сохранить JPEG с номером…', keys: 'Ctrl+S', run: saveNumbered, enabled: has },
+  save: { label: 'Сохранить JPEG с номером…', keys: 'Ctrl+S', run: () => (inDesigns() ? saveDesign() : saveNumbered()), enabled: () => has() || inDesigns() },
   savePsd: { label: 'Сохранить как PSD…', keys: 'Ctrl+Shift+S', run: savePsd, enabled: has },
   export: { label: 'Экспорт как…', keys: 'Ctrl+Shift+Alt+W', run: exportAs, enabled: has },
   close: { label: 'Закрыть документ', keys: 'Ctrl+W', run: () => closeDoc(S.cur), enabled: has },

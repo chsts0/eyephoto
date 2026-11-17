@@ -1545,8 +1545,8 @@ const inDesigns = () => document.body.classList.contains('designs');
 function enterDesigns(from = S.cur) {
   const src = from && from.design && from.srcDoc && S.docs.includes(from.srcDoc) ? from.srcDoc : from;
   const eyes = designEyesOf(from).map(cloneEye);
-  const fmt = from && from.design ? (FMT_KEYS.find((k) => im.FORMATS[k] === im.matchFormat(from.w, from.h)) || 'A4')
-    : (from && FMT_KEYS.find((k) => im.FORMATS[k] === im.matchFormat(from.w, from.h))) || 'A4';
+  // формат: как у листа, с которого пришли; если он не А-формата — последний выбранный здесь
+  const fmt = (from && FMT_KEYS.find((k) => im.FORMATS[k] === im.matchFormat(from.w, from.h))) || S.designFmt || 'A4';
   const preset = from && from.design ? from.design.preset : (S.ds && S.ds.preset) || DS.PRESETS[0].id;
   const base = from && from.design ? from.design.opts : (DS.PRESETS.find((p) => p.id === preset) || DS.PRESETS[0]).opts;
   S.ds = { src, from, eyes, small: eyes.map((e) => smallEye(e, 1100)), tiny: eyes.map((e) => smallEye(e, 220)), preset, fmt, opts: DS.normalize(base, eyes.length) };
@@ -1621,7 +1621,7 @@ async function renderDesignPreview() {
 
 function changeDesign(patch) {
   const ds = S.ds;
-  if (patch.fmt) { ds.fmt = patch.fmt; delete patch.fmt; }
+  if (patch.fmt) { ds.fmt = S.designFmt = patch.fmt; api.setSettings({ designFmt: patch.fmt }); delete patch.fmt; }
   ds.opts = DS.normalize({ ...ds.opts, ...patch }, ds.eyes.length);
   renderDesignSide();
   renderDesignPreview();
@@ -3648,6 +3648,7 @@ api.settings().then((s) => {
   D.setHistoryLimit(S.prefs.history);
   if (s.dock) dockUi.restore(s.dock);
   if (typeof s.eyeFeather === 'number') { S.opts.marquee.feather = s.eyeFeather; pupilUi.feather.set(s.eyeFeather); }
+  if (s.designFmt) S.designFmt = s.designFmt;
   if (typeof s.pupilSoft === 'number') { S.pupilSoft = s.pupilSoft; pupilUi.soft.set(s.pupilSoft); }
 });
 

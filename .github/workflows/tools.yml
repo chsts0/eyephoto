@@ -52,3 +52,39 @@ jobs:
               --notes "EyeCollect: проходит по папке готовых фото и собирает глаза в архив для обучения нейронки." || true
           fi
           gh release upload tools-v1 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber
+
+  videoframes:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Зависимости
+        run: pip install pyinstaller imageio-ffmpeg
+
+      - name: Собрать
+        shell: bash
+        run: |
+          pyinstaller --onefile --windowed --collect-all imageio_ffmpeg --name VideoFrames tools/videoframes/vframes.py
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp dist/VideoFrames.exe VideoFrames-windows.exe
+            F=VideoFrames-windows.exe
+          else
+            (cd dist && zip -qry ../VideoFrames-mac.zip VideoFrames.app)
+            F=VideoFrames-mac.zip
+          fi
+          echo "FILE=$F" >> "$GITHUB_ENV"
+
+      - name: Выложить
+        shell: bash
+        run: |
+          gh release view tools-v1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || sleep 60
+          gh release upload tools-v1 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber

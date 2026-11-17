@@ -205,65 +205,80 @@ function shapeCanvas(side, { half = null, cut = null }) {
 }
 
 // --- Россыпь кистями студии --------------------------------------------------
-// Повторяет ручную работу в фотошопе, параметры подогнаны наложением на макеты
-// каталога: край глаза со стороны разлёта прореживается мелким зерном и
-// пробивается кистями Explosion (тёмная крапинка по радужке), рядом из копии
-// глаза проявляется пыль: мелкое зерно у самой кромки, облачка кисти дальше
-// и светлые крошки по бокам.
+// Повторяет видео-инструкцию студии шаг в шаг:
+// 1) кисть 001_Explosion чёрным, размер около полутора радиусов глаза,
+//    пара кликов по краю — край темнеет крапинкой (на чёрном фоне это то же,
+//    что стереть, поэтому у нас это стёрка формы глаза: так работает и на фонах);
+// 2) штамп с выравниванием кистями 006 (мелкая пыль) и 009 (крошки, огромный
+//    размер): источник внутри глаза, клик снаружи — пыль из самой радужки.
 
-// Россыпь по кругу: base — насколько осыпается край в среднем, vary — разброс по кругу
-const SCATTER = { base: 0.35, vary: 0.45, count: 1.6, crumbs: 1.2 };
+// Россыпь по кругу (не столкновение): сколько кликов вокруг глаза
+const SCATTER = { dark: 6, dust: 10, crumbs: 3 };
 
-const BRUSH_LEVELS = [[70, 3], [40, 2.4], [28, 2.1]];
 const brushes = new Map();
 function loadBrush(i) {
   if (!brushes.has(i)) {
-    const [lo, gain] = BRUSH_LEVELS[i];
     brushes.set(i, loadAsset('brush' + i).then((img) => {
-      // белое на кисти красит: переводим яркость в прозрачность
+      // белое на кисти красит, как в фотошопе: яркость = непрозрачность.
+      // Совсем тёмный шум по краям отпечатка отрезаем.
       const c = im.makeCanvas(img.width, img.height), x = c.getContext('2d', { willReadFrequently: true });
       x.drawImage(img, 0, 0);
       const d = x.getImageData(0, 0, c.width, c.height), p = d.data;
-      for (let j = 0; j < p.length; j += 4) { p[j + 3] = Math.max(0, Math.min(255, (p[j] - lo) * gain)); p[j] = p[j + 1] = p[j + 2] = 255; }
+      let sw = 0, sxw = 0, syw = 0;
+      for (let j = 0; j < p.length; j += 4) {
+        const a = p[j] < 8 ? 0 : Math.min(255, (p[j] - 8) * 1.03);
+        p[j + 3] = a; p[j] = p[j + 1] = p[j + 2] = 255;
+        if (a) { const q = j / 4, w = a * a; sw += w; sxw += (q % c.width) * w; syw += Math.floor(q / c.width) * w; }
+      }
       x.putImageData(d, 0, 0);
+      // ядро отпечатка (где кисть плотнее всего) — им и попадаем в нужную точку,
+      // как дизайнер ставит кисть плотной частью на край глаза
+      c.coreX = sw ? sxw / sw : c.width / 2; c.coreY = sw ? syw / sw : c.height / 2;
       return c;
     }));
   }
   return brushes.get(i);
 }
 
-// Насколько рассыпается край в направлении (ux, uy): 0 — цел, 1 — сильно.
-function spreadOf(p, rand) {
-  if (p.dir) return (ux, uy) => Math.max(0, Math.min(1, (ux * p.dir[0] + uy * p.dir[1]) * 1.25 + 0.05));
-  // россыпь по кругу: местами сильнее, местами слабее
-  const nz = noiseField(rand, 6);
-  return (ux, uy) => Math.max(0, Math.min(1, p.scatter.base + p.scatter.vary * (nz(0.5 + ux * 0.45, 0.5 + uy * 0.45) - 0.5) * 2));
+// Клики кистью, всё в единицах листа.
+// dark — кисть 001 по краю; clone — штамп: куда (x, y) и откуда (sx, sy).
+function strokePlan(p, rand) {
+  const R = p.d / 2, dark = [], clone = [];
+  const at = (ang, r) => [p.x + Math.cos(ang) * r, p.y + Math.sin(ang) * r];
+  const base = p.dir ? Math.atan2(p.dir[1], p.dir[0]) : 0;
+  const around = (i, n) => (p.dir ? base + (rand() - 0.5) * 1.0 : (i / n) * Math.PI * 2 + rand() * 0.6);
+  const nd = p.dir ? 3 : SCATTER.dark;
+  for (let i = 0; i < nd; i++) {
+    const ang = around(i, nd), [x, y] = at(ang, R * (0.88 + rand() * 0.12));
+    dark.push({ x, y, size: R * (p.dir ? 1.4 + rand() * 0.25 : 0.9 + rand() * 0.2), rot: rand() * 6.3, b: 0, a: 1, n: 3 + (rand() * 3 | 0), t: ang + Math.PI / 2 });
+  }
+  // штамп: источник смещён внутрь глаза на 0.55–0.9 радиуса
+  const cl = (b, n, rMin, rJit, sMin, sJit) => {
+    for (let i = 0; i < n; i++) {
+      const ang = p.dir ? base + (rand() - 0.5) * 1.1 : (i / n) * Math.PI * 2 + rand() * 0.8;
+      const [x, y] = at(ang, R * (rMin + rand() * rJit));
+      const back = R * (0.55 + rand() * 0.35), ba = ang + (rand() - 0.5) * 0.5;
+      clone.push({ x, y, sx: x - Math.cos(ba) * back, sy: y - Math.sin(ba) * back, size: R * (sMin + rand() * sJit), rot: rand() * 6.3, b, a: 1, n: b === 2 ? 1 : 2 + (rand() * 3 | 0), t: ang + Math.PI / 2 });
+    }
+  };
+  if (p.dir) {
+    cl(1, 9, 0.85, 0.35, 1.2, 0.4);       // 006 / 007 / 008: пыль
+    cl(2, 2, 1.05, 0.35, 3.2, 0.6);       // 009 на 5000: крошки
+  } else {
+    cl(1, SCATTER.dust, 1.0, 0.2, 0.8, 0.3);
+    cl(2, SCATTER.crumbs, 1.05, 0.2, 2.2, 0.5);
+  }
+  return { dark, clone };
 }
 
-// Мазки кистью, всё в единицах листа.
-function strokePlan(p, rand) {
-  const R = p.d / 2, erase = [], reveal = [], crumbs = [];
-  const at = (ang, r) => [p.x + Math.cos(ang) * r, p.y + Math.sin(ang) * r];
-  const dirs = p.dir ? [Math.atan2(p.dir[1], p.dir[0])] : null;
-  const pick = (spread) => (dirs ? dirs[0] + (rand() - 0.5) * spread : rand() * Math.PI * 2);
-  const k = p.dir ? 1 : p.scatter.count;
-  for (let i = 0; i < Math.round(40 * k); i++) {
-    const ang = pick(1.6), [x, y] = at(ang, R * (0.6 + rand() * 0.4));
-    if (!p.dir && p.spread(Math.cos(ang), Math.sin(ang)) < rand() * 0.8) continue;
-    erase.push({ x, y, size: R * (0.3 + rand() * 0.35), rot: ang + Math.PI / 2 + (rand() - 0.5), b: rand() < 0.6 ? 0 : 1, a: 0.75 + rand() * 0.25 });
+// Мазок как в фотошопе: кисть ведут, отпечатки идут с интервалом 25% размера
+// и набирают плотность. st.n — сколько отпечатков, st.t — направление мазка.
+function stroke(x, brush, st, X, Y, k, rand) {
+  const n = st.n || 1, step = st.size * 0.25 * k, t = st.t || 0;
+  for (let j = 0; j < n; j++) {
+    const o = (j - (n - 1) / 2) * step;
+    stamp(x, brush, X + Math.cos(t) * o, Y + Math.sin(t) * o, st.size * k, st.rot + j * 0.15, st.a, rand() < 0.5);
   }
-  for (let i = 0; i < Math.round(16 * k); i++) {
-    const ang = pick(1.8), [x, y] = at(ang, R * (1.05 + rand() * 0.45));
-    if (!p.dir && p.spread(Math.cos(ang), Math.sin(ang)) < rand() * 0.8) continue;
-    reveal.push({ x, y, size: R * (0.35 + rand() * 0.35), rot: ang + Math.PI / 2 + (rand() - 0.5) * 0.8, b: rand() < 0.4 ? 0 : 1, a: 0.85 + rand() * 0.15 });
-  }
-  // крошки: у столкновения по бокам от места встречи, где между глазами темно
-  for (let i = 0; i < Math.round(p.dir ? 2 : 4 * p.scatter.crumbs); i++) {
-    const ang = p.dir ? dirs[0] + (i % 2 ? -1 : 1) * (0.5 + rand() * 0.45) : rand() * Math.PI * 2;
-    const [x, y] = at(ang, R * (1.0 + rand() * 0.3));
-    crumbs.push({ x, y, size: R * (2.2 + rand() * 0.7), rot: rand() * 6.3, b: 2, a: 1 });
-  }
-  return { erase, reveal, crumbs };
 }
 
 function stamp(x, brush, cx, cy, size, rot, alpha, flip) {
@@ -273,104 +288,47 @@ function stamp(x, brush, cx, cy, size, rot, alpha, flip) {
   x.translate(cx, cy);
   x.rotate(rot);
   x.scale(k * (flip ? -1 : 1), k);
-  x.drawImage(brush, -brush.width / 2, -brush.height / 2);
+  x.drawImage(brush, -(brush.coreX ?? brush.width / 2), -(brush.coreY ?? brush.height / 2));
   x.restore();
 }
 
-// Стёрка по форме глаза (холст формы вписан в круг глаза диаметра p.d)
-function eraseStrokes(shape, plan, p, br, rand) {
-  const x = shape.getContext('2d', { willReadFrequently: true }), side = shape.width, s = side / p.d, R = side / 2;
+// Шаг 1: кисть 001 по краю глаза (холст формы вписан в круг глаза диаметра p.d)
+function darkStrokes(shape, plan, p, br, rand) {
+  const x = shape.getContext('2d'), s = shape.width / p.d, R = shape.width / 2;
   x.globalCompositeOperation = 'destination-out';
-  for (const st of plan) stamp(x, br[st.b], (st.x - p.x) * s + R, (st.y - p.y) * s + R, st.size * s, st.rot, st.a, rand() < 0.5);
+  for (const st of plan) stroke(x, br[st.b], st, (st.x - p.x) * s + R, (st.y - p.y) * s + R, s, rand);
   x.globalCompositeOperation = 'source-over';
-  // кромка со стороны разлёта прореживается зерном
-  const img = x.getImageData(0, 0, side, side), d = img.data, IN = 0.6;
-  for (let py = 0; py < side; py++) {
-    const vy = (py + 0.5 - R) / R;
-    for (let px = 0; px < side; px++) {
-      const vx = (px + 0.5 - R) / R, rr = Math.hypot(vx, vy);
-      if (rr <= IN || rr > 1) continue;
-      const i = (py * side + px) * 4;
-      if (!d[i + 3]) continue;
-      const w = p.spread(vx / rr, vy / rr);
-      if (!w) continue;
-      const e = Math.min(1, Math.pow((rr - IN) / (1 - IN), 1.5) * w * 1.15);
-      d[i + 3] = rand() < e ? 0 : Math.round(d[i + 3] * (1 - e * 0.3));
-    }
-  }
-  x.putImageData(img, 0, 0);
 }
 
-// Пыль из копии глаза: мазки кисти плюс мелкое зерно у кромки. Возвращает свойства слоя.
-function revealStrokes(plan, p, br, W, H, kMax, rand) {
-  const R = p.d / 2;
-  let x0 = p.x - R * 1.5, y0 = p.y - R * 1.5, x1 = p.x + R * 1.5, y1 = p.y + R * 1.5;
-  for (const st of [...plan.reveal, ...plan.crumbs]) {
-    x0 = Math.min(x0, st.x - st.size * 0.75); y0 = Math.min(y0, st.y - st.size * 0.75);
-    x1 = Math.max(x1, st.x + st.size * 0.75); y1 = Math.max(y1, st.y + st.size * 0.75);
+// Шаг 2: штамп. Глаз берём уже после шага 1, как в фотошопе после сведения слоёв.
+function cloneStrokes(plan, p, shape, br, W, H, kMax, rand) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const st of plan) {
+    const h = st.size * (0.72 + 0.25 * ((st.n || 1) - 1) / 2);
+    x0 = Math.min(x0, st.x - h); y0 = Math.min(y0, st.y - h); x1 = Math.max(x1, st.x + h); y1 = Math.max(y1, st.y + h);
   }
   x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W, x1); y1 = Math.min(H, y1);
   if (x1 <= x0 || y1 <= y0) return null;
   const k = Math.min(1, kMax / Math.max(W, H));
   const cw = Math.round((x1 - x0) * k), ch = Math.round((y1 - y0) * k);
-  const c = im.makeCanvas(cw, ch), x = c.getContext('2d', { willReadFrequently: true });
-  for (const st of plan.reveal) stamp(x, br[st.b], (st.x - x0) * k, (st.y - y0) * k, st.size * k, st.rot, st.a, rand() < 0.5);
-  const cc = im.makeCanvas(cw, ch), cx = cc.getContext('2d', { willReadFrequently: true });
-  for (const st of plan.crumbs) stamp(cx, br[st.b], (st.x - x0) * k, (st.y - y0) * k, st.size * k, st.rot, st.a, rand() < 0.5);
-  const img = x.getImageData(0, 0, cw, ch), d = img.data, cd = cx.getImageData(0, 0, cw, ch).data;
-  const sm = p.big, n = sm.size, sd = sm.data, dir = p.dir, RIN = 0.88;
-  // зерно мельче при малом листе не делаем: одно зерно — один пиксель холста
-  for (let py = 0; py < ch; py++) {
-    for (let px = 0; px < cw; px++) {
-      const i = (py * cw + px) * 4;
-      const vx = ((px + 0.5) / k + x0 - p.x) / R, vy = ((py + 0.5) / k + y0 - p.y) / R, rr = Math.hypot(vx, vy);
-      let a = d[i + 3] / 255;
-      if (rr > 0.8) {
-        const sp = p.spread(vx / rr, vy / rr), out = Math.max(rr - 1, 0);
-        // зерно: густо у кромки, реже дальше
-        const dens = (Math.exp(-out / 0.1) * 0.35 + Math.exp(-out / 0.3) * 0.18) * sp * (rr > 0.95 ? 1 : (rr - 0.8) / 0.15);
-        if (dens > 0 && rand() < dens) a = Math.min(1, a + 0.5 + 0.5 * rand());
-      }
-      const crumb = cd[i + 3] / 255;
-      if (crumb > a) a = crumb;
-      if (a < 0.012) { d[i + 3] = 0; continue; }
-      // цвет из копии глаза, растянутой в сторону полёта
-      let sx, sy;
-      if (dir) {
-        const t = vx * dir[0] + vy * dir[1], qx = vx - t * dir[0], qy = vy - t * dir[1], pl = Math.hypot(qx, qy);
-        if (pl >= RIN) { sx = qx / pl * RIN * 0.98; sy = qy / pl * RIN * 0.98; }
-        else { const back = Math.max(0, t - Math.sqrt(RIN * RIN - pl * pl)); sx = vx - dir[0] * back; sy = vy - dir[1] * back; }
-      } else {
-        const m = Math.min(rr, RIN) / (rr || 1);
-        sx = vx * m; sy = vy * m;
-      }
-      const qx = Math.max(0, Math.min(n - 1, Math.round(n / 2 + sx * (n / 2 - 1)))), qy = Math.max(0, Math.min(n - 1, Math.round(n / 2 + sy * (n / 2 - 1))));
-      const j = (qy * n + qx) * 4;
-      if (sd[j + 3] < 128) { d[i + 3] = 0; continue; }
-      const lift = a > 0.5 && d[i + 3] < 30 ? 0.95 : 1.12;
-      let r = sd[j] * lift, g = sd[j + 1] * lift, b = sd[j + 2] * lift;
-      // крошки светлее: на свету они выглядят выгоревшими
-      if (crumb > 0.3) { r = r * 0.75 + 60; g = g * 0.75 + 55; b = b * 0.75 + 45; }
-      d[i] = Math.min(255, r); d[i + 1] = Math.min(255, g); d[i + 2] = Math.min(255, b);
-      d[i + 3] = Math.round(a * 255);
-    }
+  // глаз после шага 1
+  const src = im.makeCanvas(p.big.size, p.big.size), sx = src.getContext('2d');
+  sx.drawImage(p.big.canvas, 0, 0);
+  sx.globalCompositeOperation = 'destination-in';
+  sx.drawImage(shape, 0, 0, src.width, src.height);
+  const out = im.makeCanvas(cw, ch), ox = out.getContext('2d');
+  const tmp = im.makeCanvas(cw, ch), tx = tmp.getContext('2d');
+  for (const st of plan) {
+    tx.globalCompositeOperation = 'source-over';
+    tx.clearRect(0, 0, cw, ch);
+    stroke(tx, br[st.b], st, (st.x - x0) * k, (st.y - y0) * k, k, rand);
+    // в отпечаток кисти — кусок глаза, сдвинутый от источника к месту клика
+    tx.globalCompositeOperation = 'source-in';
+    const dx = st.x - st.sx, dy = st.y - st.sy;
+    tx.drawImage(src, (p.x - p.d / 2 + dx - x0) * k, (p.y - p.d / 2 + dy - y0) * k, p.d * k, p.d * k);
+    ox.drawImage(tmp, 0, 0);
   }
-  x.putImageData(img, 0, 0);
-  return { canvas: c, cx: x0 + cw / k / 2, cy: y0 + ch / k / 2, scale: 1 / k };
-}
-
-// Мелкая светлая пыль понизу листа, как на печати каталога
-function drawDust(x, W, H, rand) {
-  const n = Math.round(W * H / 260);
-  for (let i = 0; i < n; i++) {
-    const t = Math.pow(rand(), 0.45);              // гуще к низу
-    const y = H * (0.45 + 0.55 * t), xx = W * rand();
-    const fade = (y / H - 0.45) / 0.55;
-    if (rand() > fade * fade) continue;
-    const s = 0.6 + rand() * 1.1;
-    x.fillStyle = `rgba(235,235,235,${(0.08 + rand() * 0.3).toFixed(2)})`;
-    x.fillRect(xx, y, s, s);
-  }
+  return { canvas: out, cx: x0 + cw / k / 2, cy: y0 + ch / k / 2, scale: 1 / k };
 }
 
 // --- Увеличение: размытая затемнённая копия глаза во весь фон ------------------
@@ -453,13 +411,6 @@ export async function build(o0, eyes0, W, H, { thumb = false } = {}) {
     out.push(full(c, k, { name: 'Увеличение' }));
   }
 
-  // пыль под глазами
-  if (o.scatter && o.bg !== 'collage') {
-    const { c, k } = sheetCanvas(thumb ? 400 : 4200);
-    drawDust(c.getContext('2d'), c.width, c.height, rand);
-    out.push(full(c, k, { name: 'Пыль', opacity: 0.9 }));
-  }
-
   // направления столкновения: каждый глаз рассыпается к другому
   if (o.design === 'collision') {
     const [a, b] = placed, dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy) || 1;
@@ -480,8 +431,6 @@ export async function build(o0, eyes0, W, H, { thumb = false } = {}) {
       opts.cut = { dx: (a.x - p.x) / (p.d / 2), dy: (a.y - p.y) / (p.d / 2), r: a.d / p.d, y: 0 };
     }
     if (o.scatter) {
-      p.scatter = SCATTER;
-      p.spread = spreadOf(p, rand);
       p.plan = strokePlan(p, rand);
     }
     const eyeLayer = {
@@ -491,18 +440,19 @@ export async function build(o0, eyes0, W, H, { thumb = false } = {}) {
     if (opts.half != null || opts.cut || p.plan) {
       const side = Math.min(thumb ? 200 : 2600, Math.round(side0));
       const shape = shapeCanvas(side, opts);
-      if (p.plan) eraseStrokes(shape, p.plan.erase, p, br, rand);
+      if (p.plan) darkStrokes(shape, p.plan.dark, p, br, rand);
+      p.shape = shape;
       out.push({ name: `Форма ${i + 1}`, canvas: shape, cx: p.x, cy: p.y, scale: p.d / side });
       eyeLayer.clip = true;
     }
     out.push(eyeLayer);
   });
 
-  // разлёт поверх глаз: у каждого глаза свой слой, его можно подтереть ластиком
+  // штамп поверх глаз: у каждого глаза свой слой, его можно подтереть ластиком
   if (o.scatter) {
     placed.forEach((p, i) => {
-      const l = revealStrokes(p.plan, p, br, W, H, thumb ? 400 : 4200, rand);
-      if (l) out.push({ name: placed.length > 1 ? `Разлёт ${i + 1}` : 'Разлёт', ...l });
+      const l = cloneStrokes(p.plan.clone, p, p.shape, br, W, H, thumb ? 400 : 4200, rand);
+      if (l) out.push({ name: placed.length > 1 ? `Штамп ${i + 1}` : 'Штамп', ...l });
     });
   }
   if (overlay) out.push(overlay);

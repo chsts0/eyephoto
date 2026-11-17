@@ -61,6 +61,12 @@ class FourierUnit(nn.Module):
         return br @ icw - bi @ isw
 
     def forward(self, x):
+        # спектральная часть всегда в полной точности: в половинной (fp16)
+        # спектр переполняется и всё обучение превращается в nan
+        with torch.autocast(x.device.type, enabled=False):
+            return self._forward(x.float())
+
+    def _forward(self, x):
         b = x.shape[0]
         h, w = x.shape[-2:]
         if self.matmul_fft:

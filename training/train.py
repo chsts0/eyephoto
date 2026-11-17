@@ -299,6 +299,7 @@ def main():
     ap.add_argument('--warmup', type=int, default=600, help='шагов разогрева дискриминатора')
     ap.add_argument('--eval-every', type=int, default=1000)
     ap.add_argument('--resume', action='store_true')
+    ap.add_argument('--no-amp', action='store_true', help='без половинной точности (медленнее, на случай nan)')
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--cache', default=os.path.expanduser('~/.cache/eyephoto'))
     ap.add_argument('--export-only', action='store_true', help='только выгрузить лучшую модель в ONNX')
@@ -330,7 +331,9 @@ def main():
     vgg = VGGLoss().to(dev)
     opt_g = torch.optim.Adam(gen.parameters(), lr=a.lr, betas=(0.5, 0.999))
     opt_d = torch.optim.Adam(disc.parameters(), lr=a.lr * 3, betas=(0.5, 0.999))
-    scaler = torch.amp.GradScaler(enabled=dev.type == 'cuda')
+    use_amp = not a.no_amp and dev.type == 'cuda'
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    bad = 0
     step, best = 0, None
 
     last = os.path.join(a.out, 'last.pt')
@@ -366,9 +369,22 @@ def main():
         x, m, v = x.to(dev, non_blocking=True), m.to(dev, non_blocking=True), v.to(dev, non_blocking=True)
         warm = step < a.warmup
 
-        with torch.autocast(dev.type, enabled=dev.type == 'cuda', dtype=torch.float16):
+        with torch.autocast(dev.type, enabled=use_amp, dtype=torch.float16):
             y = net(x, m)
         y = y.float()
+        # сломанный шаг (nan) пропускаем; если их много подряд, останавливаемся, а не жжём часы впустую
+        if not torch.isfinite(x).all() or not torch.isfinite(y).all():
+            bad += 1
+            print(f'шаг {step}: ' + ('битая картинка во входе' if not torch.isfinite(x).all() else 'генератор выдал nan') + ', пропускаю', flush=True)
+            if bad >= 5 and use_amp:
+                # половинная точность не тянет: дальше в полной, медленнее, но надёжно
+                use_amp = False
+                scaler = torch.amp.GradScaler(enabled=False)
+                print('Перехожу на полную точность', flush=True)
+            if bad >= 20:
+                raise SystemExit('Обучение сломалось: 20 шагов подряд nan. Пришлите лог.')
+            continue
+        bad = 0
 
         # дискриминатор: настоящая радужка против дорисованного места
         x.requires_grad_(step % 4 == 0)
@@ -380,7 +396,12 @@ def main():
             g, = torch.autograd.grad(d_real.sum(), x, create_graph=True)
             loss_d = loss_d + 0.001 * 4 * g.pow(2).sum(dim=[1, 2, 3]).mean()
         opt_d.zero_grad(set_to_none=True)
+        if not torch.isfinite(loss_d):
+            print(f'шаг {step}: nan у дискриминатора, пропускаю', flush=True)
+            step += 1
+            continue
         loss_d.backward()
+        torch.nn.utils.clip_grad_norm_(disc.parameters(), 10.0)
         opt_d.step()
         x = x.detach()
 
@@ -396,6 +417,10 @@ def main():
             pl = vgg(y, x, v)
             loss_g = 10 * adv + 100 * fm + 10 * l1_known + 1 * l1_hole + 1 * pl
             opt_g.zero_grad(set_to_none=True)
+            if not torch.isfinite(loss_g):
+                print(f'шаг {step}: nan у генератора, пропускаю', flush=True)
+                step += 1
+                continue
             scaler.scale(loss_g).backward()
             scaler.unscale_(opt_g)
             torch.nn.utils.clip_grad_norm_(gen.parameters(), 1.0)

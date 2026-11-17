@@ -136,6 +136,8 @@ function assetName(o) {
 // Где стоят глаза: список { x, y, d } в пикселях листа
 function slotsFor(o, W, H) {
   let list;
+  // свои места (для стенда сравнения): [[x, y, d], …] в тех же долях
+  if (o.slots) return o.slots.map(([x, y, d]) => ({ x: x * W, y: y * H, d: d * H }));
   const kind = o.design === 'halves' || o.count === 1 ? 'single' : o.count === 3 ? 'triangle' : o.place;
   if (o.design === 'infinity') list = L.infinity;
   else if (o.design === 'collision') list = L.collision;
@@ -224,16 +226,11 @@ function loadBrush(i) {
       const c = im.makeCanvas(img.width, img.height), x = c.getContext('2d', { willReadFrequently: true });
       x.drawImage(img, 0, 0);
       const d = x.getImageData(0, 0, c.width, c.height), p = d.data;
-      let sw = 0, sxw = 0, syw = 0;
       for (let j = 0; j < p.length; j += 4) {
         const a = p[j] < 8 ? 0 : Math.min(255, (p[j] - 8) * 1.03);
         p[j + 3] = a; p[j] = p[j + 1] = p[j + 2] = 255;
-        if (a) { const q = j / 4, w = a * a; sw += w; sxw += (q % c.width) * w; syw += Math.floor(q / c.width) * w; }
       }
       x.putImageData(d, 0, 0);
-      // ядро отпечатка (где кисть плотнее всего) — им и попадаем в нужную точку,
-      // как дизайнер ставит кисть плотной частью на край глаза
-      c.coreX = sw ? sxw / sw : c.width / 2; c.coreY = sw ? syw / sw : c.height / 2;
       return c;
     }));
   }
@@ -242,31 +239,43 @@ function loadBrush(i) {
 
 // Клики кистью, всё в единицах листа.
 // dark — кисть 001 по краю; clone — штамп: куда (x, y) и откуда (sx, sy).
-function strokePlan(p, rand) {
+// Клики столкновения, сняты с видео студии (лист 6300×4440, глаз ≈ 2650 px):
+// кисть 001 размером 2048 ≈ 1.54 радиуса, 006 — 1843…2293 ≈ 1.4…1.7 радиуса,
+// 009 — 5000 ≈ 3.8 радиуса. Только клики, без мазков.
+const TUNE = {
+  fall: 0.25,
+  nDark: 22, darkR0: 0.85, darkRj: 0.35, darkSpread: 1.3, darkSize: 1.54,
+  nDust: 5, dustR0: 1.0, dustRj: 0.25, dustSpread: 1.0, dustSize0: 1.39, dustSizeJ: 0.34, back0: 0.35, backJ: 0.25,
+  nCrumb: 2, crR0: 1.1, crRj: 0.4, crSpread: 1.2, crSize: 3.77,
+};
+
+function strokePlan(p, rand, tune) {
+  const T = { ...TUNE, ...(tune || {}) };
   const R = p.d / 2, dark = [], clone = [];
   const at = (ang, r) => [p.x + Math.cos(ang) * r, p.y + Math.sin(ang) * r];
-  const base = p.dir ? Math.atan2(p.dir[1], p.dir[0]) : 0;
-  const around = (i, n) => (p.dir ? base + (rand() - 0.5) * 1.0 : (i / n) * Math.PI * 2 + rand() * 0.6);
-  const nd = p.dir ? 3 : SCATTER.dark;
+  // в видео дизайнер ведёт разлёт к соседу, но чуть книзу: пыль «осыпается».
+  // Направление к соседу доворачиваем вниз листа на T.fall.
+  const base = p.dir ? Math.atan2(p.dir[1] + T.fall, p.dir[0]) : 0;
+  const pick = (i, n, spread) => (p.dir ? base + (rand() - 0.5) * spread : (i / n) * Math.PI * 2 + rand() * 0.6);
+  const nd = p.dir ? T.nDark : SCATTER.dark;
   for (let i = 0; i < nd; i++) {
-    const ang = around(i, nd), [x, y] = at(ang, R * (0.88 + rand() * 0.12));
-    dark.push({ x, y, size: R * (p.dir ? 1.4 + rand() * 0.25 : 0.9 + rand() * 0.2), rot: rand() * 6.3, b: 0, a: 1, n: 3 + (rand() * 3 | 0), t: ang + Math.PI / 2 });
+    const ang = pick(i, nd, T.darkSpread), [x, y] = at(ang, R * (T.darkR0 + rand() * T.darkRj));
+    dark.push({ x, y, size: R * (p.dir ? T.darkSize : 0.9 + rand() * 0.2), rot: 0, b: 0, a: 1 });
   }
-  // штамп: источник смещён внутрь глаза на 0.55–0.9 радиуса
-  const cl = (b, n, rMin, rJit, sMin, sJit) => {
+  // штамп: источник смещён внутрь глаза
+  const cl = (b, n, r0, rj, spread, s0, sj) => {
     for (let i = 0; i < n; i++) {
-      const ang = p.dir ? base + (rand() - 0.5) * 1.1 : (i / n) * Math.PI * 2 + rand() * 0.8;
-      const [x, y] = at(ang, R * (rMin + rand() * rJit));
-      const back = R * (0.55 + rand() * 0.35), ba = ang + (rand() - 0.5) * 0.5;
-      clone.push({ x, y, sx: x - Math.cos(ba) * back, sy: y - Math.sin(ba) * back, size: R * (sMin + rand() * sJit), rot: rand() * 6.3, b, a: 1, n: b === 2 ? 1 : 2 + (rand() * 3 | 0), t: ang + Math.PI / 2 });
+      const ang = pick(i, n, spread), [x, y] = at(ang, R * (r0 + rand() * rj));
+      const back = R * (T.back0 + rand() * T.backJ), ba = ang + (rand() - 0.5) * 0.5;
+      clone.push({ x, y, sx: x - Math.cos(ba) * back, sy: y - Math.sin(ba) * back, size: R * (s0 + rand() * sj), rot: 0, b, a: 1 });
     }
   };
   if (p.dir) {
-    cl(1, 9, 0.85, 0.35, 1.2, 0.4);       // 006 / 007 / 008: пыль
-    cl(2, 2, 1.05, 0.35, 3.2, 0.6);       // 009 на 5000: крошки
+    cl(1, T.nDust, T.dustR0, T.dustRj, T.dustSpread, T.dustSize0, T.dustSizeJ);
+    cl(2, T.nCrumb, T.crR0, T.crRj, T.crSpread, T.crSize, 0);
   } else {
-    cl(1, SCATTER.dust, 1.0, 0.2, 0.8, 0.3);
-    cl(2, SCATTER.crumbs, 1.05, 0.2, 2.2, 0.5);
+    cl(1, SCATTER.dust, 1.0, 0.2, 0, 0.8, 0.3);
+    cl(2, SCATTER.crumbs, 1.05, 0.2, 0, 2.2, 0.5);
   }
   return { dark, clone };
 }
@@ -277,7 +286,7 @@ function stroke(x, brush, st, X, Y, k, rand) {
   const n = st.n || 1, step = st.size * 0.25 * k, t = st.t || 0;
   for (let j = 0; j < n; j++) {
     const o = (j - (n - 1) / 2) * step;
-    stamp(x, brush, X + Math.cos(t) * o, Y + Math.sin(t) * o, st.size * k, st.rot + j * 0.15, st.a, rand() < 0.5);
+    stamp(x, brush, X + Math.cos(t) * o, Y + Math.sin(t) * o, st.size * k, st.rot, st.a, false);
   }
 }
 
@@ -288,7 +297,7 @@ function stamp(x, brush, cx, cy, size, rot, alpha, flip) {
   x.translate(cx, cy);
   x.rotate(rot);
   x.scale(k * (flip ? -1 : 1), k);
-  x.drawImage(brush, -(brush.coreX ?? brush.width / 2), -(brush.coreY ?? brush.height / 2));
+  x.drawImage(brush, -brush.width / 2, -brush.height / 2);
   x.restore();
 }
 
@@ -431,7 +440,7 @@ export async function build(o0, eyes0, W, H, { thumb = false } = {}) {
       opts.cut = { dx: (a.x - p.x) / (p.d / 2), dy: (a.y - p.y) / (p.d / 2), r: a.d / p.d, y: 0 };
     }
     if (o.scatter) {
-      p.plan = strokePlan(p, rand);
+      p.plan = strokePlan(p, rand, o.tune);
     }
     const eyeLayer = {
       name: e.name || `Глаз ${i + 1}`, kind: 'eye', canvas: im.cloneCanvas(e.canvas), adjust: e.adjust && { ...e.adjust },

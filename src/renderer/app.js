@@ -4,6 +4,7 @@ import * as ui from './ui.js';
 import { initDock } from './dock.js';
 import { newDocDialog } from './newdoc.js';
 import { openSettings, assistantPanel } from './settings.js';
+import * as DS from './designs.js';
 
 const api = window.eyephoto;
 const $ = (id) => document.getElementById(id);
@@ -1137,6 +1138,7 @@ function buildPsd(d) {
     }, { generateThumbnail: true }));
 }
 window.__psd = (file) => api.writePath({ file, data: buildPsd(S.cur) });
+window.__jpeg = async (file) => api.writePath({ file, data: await sheetJpeg(S.cur) });
 
 async function savePsd() {
   const d = S.cur;
@@ -1488,6 +1490,191 @@ async function openTemplate(item) {
   else if (doc.tplEyes.length) fillTemplate(doc);
   doc.changed = !!doc.tplEyes.length;
   refresh(); fit();
+}
+
+// --- Дизайны листа -----------------------------------------------------------
+// Панель с готовыми дизайнами из каталога. Миниатюры собираются из глаз
+// текущего листа. Клик открывает новый лист с дизайном, сверху плашка
+// с переключателями: дизайн, фон, сколько глаз, раскладка, россыпь.
+
+const designEyesOf = (d) => (d ? (d.designEyes && d.designEyes.length ? d.designEyes : templateEyes(d)) : []);
+const eyesSig = (eyes) => eyes.map((e) => `${e.eyeKey || e.name}:${e.canvas.width}`).join('|');
+const thumbCache = new Map();
+let designSig = '';
+
+function smallEye(e, size) {
+  const k = Math.min(1, size / Math.max(e.canvas.width, e.canvas.height));
+  const src = e.adjust ? im.applyAdjust(e.canvas, e.adjust, k) : e.canvas;
+  const c = im.makeCanvas(e.canvas.width * k, e.canvas.height * k);
+  const x = c.getContext('2d');
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(src, 0, 0, c.width, c.height);
+  return { ...e, canvas: c, adjust: null };
+}
+
+async function renderDesign(opts, eyes, w, h) {
+  const { layers } = await DS.build(opts, eyes, w, h, { thumb: true });
+  const doc = D.makeDoc({ name: 'превью', w, h });
+  doc.layers.push(...layers.map((p) => D.makeLayer(p)));
+  const c = im.makeCanvas(w, h), x = c.getContext('2d');
+  x.imageSmoothingQuality = 'high';
+  D.composite(x, doc, { full: true });
+  return c;
+}
+
+function refreshDesigns() {
+  const panel = $('designPanel'), box = $('designBtns');
+  const eyes = designEyesOf(S.cur);
+  panel.hidden = !eyes.length;
+  if (!eyes.length) { designSig = ''; return; }
+  const sig = eyesSig(eyes);
+  if (sig === designSig && box.childElementCount) { markDesign(); return; }
+  designSig = sig;
+  box.textContent = '';
+  const small = eyes.map((e) => smallEye(e, 220));
+  const grid = ui.el('div', 'design-grid');
+  for (const p of DS.PRESETS) {
+    const o = DS.normalize(p.opts, eyes.length);
+    const b = ui.el('button', 'design-card');
+    b.dataset.id = p.id;
+    b.title = `${p.name}: открыть лист с этим дизайном`;
+    const pic = ui.el('div', 'design-pic');
+    b.append(pic, ui.el('span', '', p.name));
+    // дизайн, которому не хватает глаз (половинки из одного глаза), не показываем
+    if (p.opts.design && p.opts.design !== 'eyes' && o.design !== p.opts.design) continue;
+    b.onclick = () => openDesign(p);
+    grid.appendChild(b);
+    const key = sig + '#' + p.id;
+    const put = (c) => { pic.textContent = ''; pic.appendChild(c); };
+    if (thumbCache.has(key)) put(thumbCache.get(key));
+    else {
+      renderDesign(o, small, 240, 170).then((c) => { thumbCache.set(key, c); if (thumbCache.size > 60) thumbCache.delete(thumbCache.keys().next().value); put(c); })
+        .catch((e) => console.error(e));
+    }
+  }
+  box.appendChild(grid);
+  markDesign();
+}
+function markDesign() {
+  const id = S.cur && S.cur.design && S.cur.design.preset;
+  $('designBtns').querySelectorAll('.design-card').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
+}
+
+async function openDesign(preset) {
+  if (S.busy) return;
+  const src = S.cur, eyes = designEyesOf(src).map(cloneEye);
+  if (!eyes.length) return;
+  const open = S.docs.find((d) => d.design && d.design.preset === preset.id && sameEyes(d.designEyes || [], eyes));
+  if (open) { switchDoc(open); refresh(); return; }
+  const f = (src && im.matchFormat(src.w, src.h)) || im.FORMATS.A4;
+  const doc = D.makeDoc({ name: `Дизайн ${preset.name.toLowerCase()}`, w: f.w, h: f.h });
+  doc.design = { preset: preset.id, opts: DS.normalize(preset.opts, eyes.length) };
+  doc.designEyes = eyes;
+  doc.srcDoc = src && (src.srcDoc && S.docs.includes(src.srcDoc) && !eyeSources(src).length ? src.srcDoc : src);
+  await setBusy('Собираю дизайн');
+  try {
+    const { layers, opts } = await DS.build(doc.design.opts, eyes, doc.w, doc.h);
+    doc.design.opts = opts;
+    doc.layers.push(...layers.map((p) => D.makeLayer(p)));
+  } catch (e) {
+    console.error(e);
+    setBusy('');
+    await ui.tell('Не получилось собрать дизайн', String(e.message || e));
+    return;
+  }
+  setBusy('');
+  doc.changed = true;
+  addDoc(doc);
+  refresh(); fit();
+}
+
+// Пересобрать дизайн с новыми настройками. Правки слоёв дизайна при этом
+// заменяются, поэтому это одна запись в истории: отменяется Ctrl+Z.
+async function applyDesign(change, label) {
+  const doc = S.cur;
+  if (!doc || !doc.design || S.busy) return;
+  const opts = DS.normalize({ ...doc.design.opts, ...change }, doc.designEyes.length);
+  let fmt = null;
+  if (change.fmt) {
+    fmt = im.FORMATS[change.fmt];
+    delete opts.fmt;
+  }
+  await setBusy('Собираю дизайн');
+  try {
+    const w = fmt ? fmt.w : doc.w, h = fmt ? fmt.h : doc.h;
+    const { layers, opts: o } = await DS.build(opts, doc.designEyes, w, h);
+    const bg = doc.layers.find((l) => l.name === 'Фон' && l.locked && l.kind === 'pixel');
+    if (fmt) {
+      // другой формат: новый размер листа, история прежнего размера не подходит
+      doc.w = w; doc.h = h;
+      const c = im.makeCanvas(w, h), x = c.getContext('2d');
+      x.fillStyle = '#000'; x.fillRect(0, 0, w, h);
+      doc.layers = [D.makeLayer({ name: 'Фон', canvas: c, cx: w / 2, cy: h / 2, locked: true }), ...layers.map((p) => D.makeLayer(p))];
+      doc.undo = []; doc.redo = []; doc.sel = null; doc.active = [];
+      doc.changed = true;
+    } else {
+      D.structEdit(doc, label || 'Дизайн', () => {
+        doc.layers = [...(bg ? [bg] : []), ...layers.map((p) => D.makeLayer(p))];
+        doc.active = [];
+      });
+    }
+    doc.design.opts = o;
+  } catch (e) {
+    console.error(e);
+    ui.toast('Не получилось собрать дизайн');
+  }
+  setBusy('');
+  refresh(); requestDraw();
+  if (fmt) fit();
+}
+
+function refreshDesignBar() {
+  const bar = $('designbar'), d = S.cur;
+  bar.hidden = !(d && d.design);
+  if (bar.hidden) return;
+  const o = d.design.opts, n = d.designEyes.length, ok = DS.allowed(o, n);
+  bar.textContent = '';
+  const seg = (title, items, cur, key, allow) => {
+    const g = ui.el('div', 'db-group');
+    g.appendChild(ui.el('span', 'db-label', title));
+    const s = ui.el('div', 'db-seg');
+    for (const [v, label, tip] of items) {
+      const b = ui.el('button', String(cur) === String(v) ? 'on' : '', label);
+      if (tip) b.title = tip;
+      b.disabled = allow ? !allow[v] : false;
+      b.onclick = () => { if (String(cur) !== String(v)) applyDesign({ [key]: v }, `${title}: ${label}`); };
+      s.appendChild(b);
+    }
+    g.appendChild(s);
+    bar.appendChild(g);
+  };
+  seg('Дизайн', Object.entries(DS.DESIGN_NAMES), o.design, 'design', ok.design);
+  seg('Фон', Object.entries(DS.BG_NAMES), o.bg, 'bg', ok.bg);
+  if (o.design === 'eyes') {
+    seg('Глаз', [[1, '1'], [2, '2'], [3, '3', 'Треугольником, только на чёрном и граффити']], o.count, 'count', ok.count);
+    if (o.count === 2) seg('Раскладка', [['whole', 'Целые'], ['corners', 'Углы']], o.place, 'place', ok.place);
+  }
+  if (o.design === 'halves') seg('Разрез', [['v', 'Вертикально'], ['h', 'Горизонтально']], o.split, 'split');
+  const f = im.matchFormat(d.w, d.h);
+  seg('Формат', Object.entries(im.FORMATS).map(([k, v]) => [k, v.label]), f ? Object.keys(im.FORMATS).find((k) => im.FORMATS[k] === f) : '', 'fmt');
+  const acts = ui.el('div', 'db-group');
+  if (o.design !== 'collision') {
+    const t = ui.el('button', 'db-btn' + (o.scatter ? ' on' : ''), 'Россыпь');
+    t.title = 'Края глаз рассыпаются пылью цвета глаза';
+    t.onclick = () => applyDesign({ scatter: !o.scatter }, o.scatter ? 'Убрать россыпь' : 'Россыпь');
+    acts.appendChild(t);
+  }
+  if (o.scatter) {
+    const r = ui.el('button', 'db-btn', 'Другая россыпь');
+    r.onclick = () => applyDesign({ seed: (o.seed || 1) + 1 + Math.floor(Math.random() * 1000) }, 'Другая россыпь');
+    acts.appendChild(r);
+  }
+  if (n > 1 && (o.design !== 'eyes' || o.count > 1 || n > 1)) {
+    const sw = ui.el('button', 'db-btn', 'Поменять глаза');
+    sw.onclick = () => applyDesign({ swap: !o.swap }, 'Поменять глаза');
+    acts.appendChild(sw);
+  }
+  bar.appendChild(acts);
 }
 
 // Шаблоны на панели раскладываются по разделам. Подписи короткие, полное имя
@@ -3042,6 +3229,8 @@ function refresh() {
   refreshActions();
   refreshCtx();
   refreshBack();
+  refreshDesigns();
+  refreshDesignBar();
   syncMacMenu();
   const d = S.cur;
   $('saveBtn').disabled = $('placeBtn').disabled = false;

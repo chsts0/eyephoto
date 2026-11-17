@@ -294,12 +294,12 @@ def main():
     ap.add_argument('--out', default='out')
     ap.add_argument('--hours', type=float, default=9, help='сколько часов учить (Kaggle даёт до 12)')
     ap.add_argument('--steps', type=int, default=0, help='или сколько шагов (0 — по времени)')
-    ap.add_argument('--batch', type=int, default=4)
+    ap.add_argument('--batch', type=int, default=2)
     ap.add_argument('--lr', type=float, default=3e-5)
     ap.add_argument('--warmup', type=int, default=600, help='шагов разогрева дискриминатора')
     ap.add_argument('--eval-every', type=int, default=1000)
     ap.add_argument('--resume', action='store_true')
-    ap.add_argument('--no-amp', action='store_true', help='без половинной точности (медленнее, на случай nan)')
+    ap.add_argument('--amp', action='store_true', help='половинная точность: быстрее, но на T4 big-lama в ней уходит в nan')
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--cache', default=os.path.expanduser('~/.cache/eyephoto'))
     ap.add_argument('--export-only', action='store_true', help='только выгрузить лучшую модель в ONNX')
@@ -331,7 +331,7 @@ def main():
     vgg = VGGLoss().to(dev)
     opt_g = torch.optim.Adam(gen.parameters(), lr=a.lr, betas=(0.5, 0.999))
     opt_d = torch.optim.Adam(disc.parameters(), lr=a.lr * 3, betas=(0.5, 0.999))
-    use_amp = not a.no_amp and dev.type == 'cuda'
+    use_amp = a.amp and dev.type == 'cuda'
     scaler = torch.amp.GradScaler(enabled=use_amp)
     bad = 0
     step, best = 0, None

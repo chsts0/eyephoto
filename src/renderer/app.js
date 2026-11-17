@@ -1631,7 +1631,11 @@ async function applyDesign(change, label) {
 
 function refreshDesignBar() {
   const bar = $('designbar'), d = S.cur;
+  const was = bar.hidden;
   bar.hidden = !(d && d.design);
+  // в дизайне раскладка листа не нужна: места глаз задаёт сам дизайн
+  $('actionsPanel').hidden = !!(d && d.design);
+  if (was !== bar.hidden) requestAnimationFrame(() => { resize(); if (S.cur) fit(); });
   if (bar.hidden) return;
   const o = d.design.opts, n = d.designEyes.length, ok = DS.allowed(o, n);
   bar.textContent = '';

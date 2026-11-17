@@ -100,6 +100,16 @@ jobs:
           cp -r "$(dirname "$(find tmp-llama -name llama-server.exe | head -1)")"/. vendor/llama/
           ls vendor/llama
 
+      - name: Токен бота обратной связи
+        if: steps.ver.outputs.exists == 'false'
+        shell: bash
+        env:
+          TG: ${{ secrets.TG_BOT_TOKEN }}
+        run: |
+          mkdir -p build-res
+          node -e "require('fs').writeFileSync('build-res/feedback.json', JSON.stringify({ token: process.env.TG || '' }))"
+          [ -n "$TG" ] && echo "токен есть" || echo "секрета TG_BOT_TOKEN нет: обратная связь будет копиться в очереди"
+
       - name: Собрать установщик
         if: steps.ver.outputs.exists == 'false'
         run: npx electron-builder --win --publish never
@@ -155,6 +165,15 @@ jobs:
           case "$A" in *.zip) unzip -q llama-pkg -d tmp-llama ;; *) tar xzf llama-pkg -C tmp-llama ;; esac
           cp -R "$(dirname "$(find tmp-llama -name llama-server -type f | head -1)")"/. vendor/llama/
           ls vendor/llama
+
+      - name: Токен бота обратной связи
+        shell: bash
+        env:
+          TG: ${{ secrets.TG_BOT_TOKEN }}
+        run: |
+          mkdir -p build-res
+          node -e "require('fs').writeFileSync('build-res/feedback.json', JSON.stringify({ token: process.env.TG || '' }))"
+          [ -n "$TG" ] && echo "токен есть" || echo "секрета TG_BOT_TOKEN нет: обратная связь будет копиться в очереди"
 
       - name: Собрать под мак
         run: npx electron-builder --mac --publish never

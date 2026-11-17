@@ -227,7 +227,7 @@ function loadBrush(i) {
       x.drawImage(img, 0, 0);
       const d = x.getImageData(0, 0, c.width, c.height), p = d.data;
       for (let j = 0; j < p.length; j += 4) {
-        const a = p[j] < 8 ? 0 : Math.min(255, (p[j] - 8) * 1.03);
+        const a = p[j] < 14 ? 0 : Math.min(255, (p[j] - 14) * 1.06);
         p[j + 3] = a; p[j] = p[j + 1] = p[j + 2] = 255;
       }
       x.putImageData(d, 0, 0);

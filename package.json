@@ -73,6 +73,10 @@
     },
     "extraResources": [
       {
+        "from": "build-res/feedback.json",
+        "to": "feedback.json"
+      },
+      {
         "from": "vendor/llama",
         "to": "llama"
       },

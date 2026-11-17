@@ -133,23 +133,40 @@ async function saveSettings(patch) {
 ipcMain.handle('settings-get', loadSettings);
 
 // --- Обратная связь ---------------------------------------------------------
-// Сообщения уходят в Google Форму, ответы которой складываются в таблицу.
+// Сообщения уходят телеграм-ботом студии владельцу в личку.
+// Токена бота нет в коде: сборка на гитхабе кладёт его из секрета TG_BOT_TOKEN
+// в feedback.json рядом с программой. Для запуска из исходников —
+// переменная окружения EYEPHOTO_TG_TOKEN.
 // Без интернета сообщение ждёт в очереди и уходит при следующем запуске.
-const FEEDBACK = {
-  url: '',            // https://docs.google.com/forms/d/e/…/formResponse
-  fields: { kind: '', text: '', name: '', info: '' },   // entry.… для каждого поля
-};
+const TG_CHATS = [630410528];   // кому слать: id чатов (появляются после /start боту)
+let tgToken = null;
+async function feedbackToken() {
+  if (tgToken !== null) return tgToken;
+  tgToken = process.env.EYEPHOTO_TG_TOKEN || '';
+  if (!tgToken) {
+    try { tgToken = JSON.parse(await fs.readFile(path.join(process.resourcesPath || '', 'feedback.json'), 'utf8')).token || ''; } catch { tgToken = ''; }
+  }
+  return tgToken;
+}
 const feedbackFile = () => path.join(app.getPath('userData'), 'feedback-queue.json');
 async function feedbackQueue() {
   try { return JSON.parse(await fs.readFile(feedbackFile(), 'utf8')); } catch { return []; }
 }
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 async function postFeedback(m) {
-  if (!FEEDBACK.url) return false;
-  const body = new URLSearchParams();
-  for (const [k, entry] of Object.entries(FEEDBACK.fields)) if (entry) body.append(entry, m[k] || '');
+  const token = await feedbackToken();
+  if (!token || !TG_CHATS.length) return false;
+  const text = `<b>${esc(m.kind)}</b>${m.name ? ' · ' + esc(m.name) : ''}\n\n${esc(m.text)}\n\n<i>${esc(m.info)}</i>`;
   try {
-    const r = await net.fetch(FEEDBACK.url, { method: 'POST', body: body.toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    return r.ok;
+    let ok = true;
+    for (const chat of TG_CHATS) {
+      const r = await net.fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+      });
+      ok = ok && r.ok;
+    }
+    return ok;
   } catch { return false; }
 }
 async function flushFeedback() {

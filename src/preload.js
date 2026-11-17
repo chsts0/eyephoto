@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('eyephoto', {
   onModelProgress: on('model-progress'),
   inpaint: (payload) => ipcRenderer.invoke('inpaint', payload),
 
+  sendFeedback: (m) => ipcRenderer.invoke('feedback-send', m),
   checkUpdate: () => ipcRenderer.invoke('update-check'),
   installUpdate: () => ipcRenderer.invoke('update-install'),
   openReleases: () => ipcRenderer.invoke('open-releases'),

@@ -131,6 +131,47 @@ async function saveSettings(patch) {
 }
 
 ipcMain.handle('settings-get', loadSettings);
+
+// --- Обратная связь ---------------------------------------------------------
+// Сообщения уходят в Google Форму, ответы которой складываются в таблицу.
+// Без интернета сообщение ждёт в очереди и уходит при следующем запуске.
+const FEEDBACK = {
+  url: '',            // https://docs.google.com/forms/d/e/…/formResponse
+  fields: { kind: '', text: '', name: '', info: '' },   // entry.… для каждого поля
+};
+const feedbackFile = () => path.join(app.getPath('userData'), 'feedback-queue.json');
+async function feedbackQueue() {
+  try { return JSON.parse(await fs.readFile(feedbackFile(), 'utf8')); } catch { return []; }
+}
+async function postFeedback(m) {
+  if (!FEEDBACK.url) return false;
+  const body = new URLSearchParams();
+  for (const [k, entry] of Object.entries(FEEDBACK.fields)) if (entry) body.append(entry, m[k] || '');
+  try {
+    const r = await net.fetch(FEEDBACK.url, { method: 'POST', body: body.toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    return r.ok;
+  } catch { return false; }
+}
+async function flushFeedback() {
+  const q = await feedbackQueue();
+  if (!q.length) return;
+  const left = [];
+  for (const m of q) if (!(await postFeedback(m))) left.push(m);
+  await fs.writeFile(feedbackFile(), JSON.stringify(left, null, 1));
+}
+ipcMain.handle('feedback-send', async (_e, m) => {
+  const s = await loadSettings();
+  const os = require('node:os');
+  const msg = {
+    kind: String(m.kind || '').slice(0, 60), text: String(m.text || '').slice(0, 4000), name: String(m.name || '').slice(0, 80),
+    info: `версия ${app.getVersion()} · ${process.platform === 'darwin' ? 'мак' : process.platform === 'win32' ? 'винда' : process.platform} ${os.release()} · точка ${s.pointPrefix || '?'} · ${os.hostname()} · ${new Date().toLocaleString('ru-RU')}`,
+  };
+  if (await postFeedback(msg)) { flushFeedback(); return { sent: true }; }
+  const q = await feedbackQueue();
+  q.push(msg);
+  await fs.writeFile(feedbackFile(), JSON.stringify(q.slice(-200), null, 1));
+  return { sent: false };
+});
 ipcMain.handle('settings-set', (_e, patch) => saveSettings(patch));
 
 // Меню программы на маке: пункты те же, что в окне на винде, но в строке меню сверху.
@@ -172,6 +213,7 @@ ipcMain.handle('choose-save-root', async () => {
 // --- Файлы ----------------------------------------------------------------
 
 ipcMain.handle('app-version', () => app.getVersion());
+app.whenReady().then(() => setTimeout(flushFeedback, 15000));
 
 const RAW_EXT = ['arw', 'dng', 'cr2', 'cr3', 'nef', 'raf', 'rw2', 'orf'];
 const IMG_EXT = ['jpg', 'jpeg', 'png', 'webp', 'bmp'];

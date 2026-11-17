@@ -5,6 +5,7 @@ import { initDock } from './dock.js';
 import { newDocDialog } from './newdoc.js';
 import { openSettings, assistantPanel } from './settings.js';
 import * as DS from './designs.js';
+import { initHelp, showNewsIfUpdated, whatsNew, feedback } from './help.js';
 
 const api = window.eyephoto;
 const $ = (id) => document.getElementById(id);
@@ -3350,6 +3351,9 @@ const CMD = {
   resetPanels: { label: 'Вернуть панели по умолчанию', run: () => dockUi.reset() },
   settings: { label: 'Настройки…', keys: 'Ctrl+K', run: () => showSettings() },
   assistant: { label: 'Спросить помощника', keys: 'F1', run: () => showSettings('assistant') },
+  whatsNew: { label: 'Что нового', run: async () => whatsNew(await api.version()) },
+  feedback: { label: 'Обратная связь…', run: feedback },
+  checkUpdates: { label: 'Проверить обновления', run: () => { ui.toast('Проверяю обновления…'); api.checkUpdate(); } },
 };
 
 const dockUi = initDock({ dock: document.querySelector('.dock'), load: () => null, save: (dock) => api.setSettings({ dock }) });
@@ -3361,7 +3365,7 @@ const MENUS = [
   { title: 'Выделение', items: ['selAll', 'deselect', '-', 'neural'] },
   { title: 'Фильтр', items: ['develop', 'neural'] },
   { title: 'Просмотр', items: ['fit', 'actual', 'zoomIn', 'zoomOut', '-', 'guides', '-', 'resetPanels'] },
-  { title: 'Справка', items: ['assistant'] },
+  { title: 'Справка', items: ['assistant', '-', 'whatsNew', 'checkUpdates', '-', 'feedback'] },
 ];
 // На маке меню живёт в системной строке сверху экрана, как у всех программ.
 if (MAC) {
@@ -3567,6 +3571,8 @@ api.version().then((v) => { $('version').textContent = v; });
 // первый запуск: сразу предлагаем скачать нейронку, чтобы потом не ждать посреди работы
 api.modelStatus().then((s) => { S.modelReady = s.ready; if (!s.ready) setTimeout(ensureModel, 600); });
 loadTemplateList();
+initHelp({ settings: () => showSettings(), assistant: () => showSettings('assistant') });
+showNewsIfUpdated();
 
 api.settings().then((s) => {
   if (s.guides === false) S.guides = false;

@@ -469,3 +469,30 @@ body.mac .optbar > * { -webkit-app-region: no-drag; }
 .db-seg button.on, .db-btn.on { background: var(--sel, rgba(75, 141, 255, .3)); border-color: rgba(255, 255, 255, .12); }
 .db-seg button:disabled { opacity: .35; }
 .db-btn { border-color: rgba(255, 255, 255, .1); }
+
+/* Кнопка «?», что нового, обратная связь */
+.hp-btn { width: 18px; height: 18px; margin-left: 4px; padding: 0; border-radius: 50%; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .04); color: var(--dim); font-size: 11px; font-weight: 600; line-height: 16px; }
+.hp-btn:hover, .hp-btn.on { color: var(--hi); border-color: rgba(255, 255, 255, .25); }
+.hp-menu { position: fixed; right: 8px; bottom: 30px; z-index: 31; width: 240px; padding: 5px; background: rgba(28, 28, 31, .97); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: 0 16px 40px rgba(0, 0, 0, .55); backdrop-filter: blur(16px); }
+.hp-item { display: flex; align-items: center; justify-content: space-between; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: none; color: var(--text); text-align: left; }
+.hp-item:hover { background: var(--sel-2); }
+.hp-note { color: var(--faint); font-size: 11px; }
+.hp-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.hp-ver-line { padding: 6px 10px 3px; color: var(--faint); font-size: 11px; }
+.hp-overlay { position: fixed; inset: 0; z-index: 45; display: grid; place-items: center; background: rgba(6, 6, 7, .6); }
+.hp-box { width: min(460px, calc(100vw - 40px)); max-height: calc(100vh - 60px); overflow: auto; padding: 20px 20px 18px; background: rgba(26, 26, 29, .98); border: 1px solid var(--line-2); border-radius: 16px; box-shadow: 0 24px 70px rgba(0, 0, 0, .6); }
+.hp-box h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+.hp-kicker { margin-bottom: 10px; color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.hp-vnum { color: var(--faint); font-size: 12px; font-weight: 400; }
+.hp-ver + .hp-ver { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.hp-ver ul { margin: 0; padding-left: 18px; color: var(--dim); line-height: 1.5; }
+.hp-ver li + li { margin-top: 4px; }
+.hp-sub { margin: 0 0 12px; color: var(--dim); }
+.hp-seg { display: flex; gap: 4px; margin-bottom: 10px; }
+.hp-seg button { flex: 1; height: 28px; border: 1px solid var(--line-2); border-radius: 8px; background: none; color: var(--dim); }
+.hp-seg button.on { background: var(--sel-2); color: var(--hi); border-color: rgba(255, 255, 255, .2); }
+.hp-text { width: 100%; min-height: 120px; resize: vertical; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 8px; background: rgba(0, 0, 0, .25); color: var(--text); font: inherit; }
+.hp-who { width: 100%; height: 30px; margin-top: 8px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 8px; background: rgba(0, 0, 0, .25); color: var(--text); font: inherit; }
+.hp-err { min-height: 16px; margin: 6px 0; color: var(--err); font-size: 12px; }
+.hp-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.hp-actions .btn { height: 30px; min-width: 92px; }

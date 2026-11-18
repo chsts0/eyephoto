@@ -385,54 +385,169 @@ export function patchRegion(canvas, bbox) {
 // а у нейронки общий цвет и свет.
 // iris: { x, y, R } — центр зрачка и радиус радужки в пикселях слоя.
 function chooseTurn(canvas, mask, region, iris) {
-  const side = region.w, step = Math.max(2, Math.round(side / 80));
+  const side = region.w, step = Math.max(2, Math.round(side / 90));
   const md = mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, side, side).data;
-  const pts = [];
+  const inM = (x, y) => md[(y * side + x) * 4 + 3] > 20;
+  // точки места и кольцо вокруг него (известная радужка): по кольцу проверяем,
+  // ложится ли источник на соседей, как штамп в фотошопе
+  const pts = [], band = [];
+  const bw = Math.max(3, Math.round(side / 40));
   for (let y = 0; y < side; y += step) for (let x = 0; x < side; x += step) {
-    if (md[(y * side + x) * 4 + 3] > 20) pts.push([region.x + x, region.y + y]);
+    if (inM(x, y)) { pts.push([region.x + x, region.y + y]); continue; }
+    let near = false;
+    for (let k = 1; k <= bw && !near; k += Math.max(1, bw >> 2)) {
+      if ((x + k < side && inM(x + k, y)) || (x - k >= 0 && inM(x - k, y)) || (y + k < side && inM(x, y + k)) || (y - k >= 0 && inM(x, y - k))) near = true;
+    }
+    if (near) band.push([region.x + x, region.y + y]);
   }
   if (!pts.length) return null;
-  // карта яркости слоя в уменьшенном виде: по ней отсекаем источники с бликами
-  const k = Math.min(1, 512 / Math.max(canvas.width, canvas.height));
+  // яркость слоя в уменьшенном виде, но не мельче 1024: ресницы должны быть видны
+  const k = Math.min(1, 1024 / Math.max(canvas.width, canvas.height));
   const lw = Math.max(1, Math.round(canvas.width * k)), lh = Math.max(1, Math.round(canvas.height * k));
   const lc = makeCanvas(lw, lh), lx = lc.getContext('2d', { willReadFrequently: true });
   lx.drawImage(canvas, 0, 0, lw, lh);
   const ld = lx.getImageData(0, 0, lw, lh).data;
-  const at = (x, y) => {
+  // мелкие тёмные линии (ресницы, волоски) видны как провал против размытой копии
+  const bc = makeCanvas(lw, lh), bx = bc.getContext('2d', { willReadFrequently: true });
+  bx.filter = 'blur(3px)'; bx.drawImage(lc, 0, 0);
+  const bd = bx.getImageData(0, 0, lw, lh).data;
+  const idx = (x, y) => {
     const ix = Math.floor(x * k), iy = Math.floor(y * k);
-    if (ix < 0 || iy < 0 || ix >= lw || iy >= lh) return null;
-    const i = (iy * lw + ix) * 4;
-    return ld[i + 3] < 200 ? null : 0.299 * ld[i] + 0.587 * ld[i + 1] + 0.114 * ld[i + 2];
+    return ix < 0 || iy < 0 || ix >= lw || iy >= lh ? -1 : (iy * lw + ix) * 4;
+  };
+  const at = (x, y) => {
+    const i = idx(x, y);
+    return i < 0 || ld[i + 3] < 200 ? null : 0.299 * ld[i] + 0.587 * ld[i + 1] + 0.114 * ld[i + 2];
+  };
+  const hp = (x, y) => {
+    const i = idx(x, y);
+    return i < 0 ? 0 : (0.299 * ld[i] + 0.587 * ld[i + 1] + 0.114 * ld[i + 2]) - (0.299 * bd[i] + 0.587 * bd[i + 1] + 0.114 * bd[i + 2]);
   };
   const inMask = (x, y) => {
     const rx = Math.round(x - region.x), ry = Math.round(y - region.y);
-    return rx >= 0 && ry >= 0 && rx < side && ry < side && md[(ry * side + rx) * 4 + 3] > 20;
+    return rx >= 0 && ry >= 0 && rx < side && ry < side && inM(rx, ry);
   };
-  // считаем только то, что на радужке: за её краем поворот всё равно даёт пустоту
+  const onIris = (p) => Math.hypot(p[0] - iris.x, p[1] - iris.y) <= iris.R * 0.97;
   const all = pts.length;
-  for (let i = pts.length - 1; i >= 0; i--) if (Math.hypot(pts[i][0] - iris.x, pts[i][1] - iris.y) > iris.R * 0.97) pts.splice(i, 1);
+  for (let i = pts.length - 1; i >= 0; i--) if (!onIris(pts[i])) pts.splice(i, 1);
   if (pts.length < all * 0.5) return null; // место в основном не на радужке
-  const all2 = [];
-  for (let deg = 20; deg <= 180; deg += 10) {
+  const ring = band.filter(onIris).map((p) => [p, at(p[0], p[1])]).filter((q) => q[1] != null);
+  // что считается нормальной радужкой рядом: всё темнее — ресницы и грязь, светлее — блики
+  const vals = ring.map((q) => q[1]).sort((p, q) => p - q);
+  const lo = vals.length ? vals[Math.floor(vals.length * 0.03)] - 14 : 0, hi = vals.length ? vals[Math.floor(vals.length * 0.97)] + 18 : 225;
+  const hps = ring.map((q) => hp(q[0][0], q[0][1])).sort((p, q) => p - q);
+  const hlo = hps.length ? Math.min(-6, hps[Math.floor(hps.length * 0.02)] - 4) : -12;
+  const cand = [];
+  for (let deg = 15; deg <= 180; deg += 5) {
     for (const sgn of [1, -1]) {
       const a = sgn * deg * Math.PI / 180, c = Math.cos(-a), sn = Math.sin(-a);
-      let good = 0;
+      const rot = (x, y) => { const dx = x - iris.x, dy = y - iris.y; return [iris.x + dx * c - dy * sn, iris.y + dx * sn + dy * c]; };
+      let good = 0, odd = 0;
       for (const [x, y] of pts) {
-        const dx = x - iris.x, dy = y - iris.y;
-        const qx = iris.x + dx * c - dy * sn, qy = iris.y + dx * sn + dy * c;
-        const L = at(qx, qy);
-        if (L != null && L < 225 && !inMask(qx, qy)) good++;
+        const [qx, qy] = rot(x, y), L = at(qx, qy);
+        if (L == null || inMask(qx, qy)) continue;
+        if (L < lo || L > Math.min(hi, 225) || hp(qx, qy) < hlo) odd++; else good++;
       }
-      const score = good / pts.length - deg * 0.0008; // при равенстве берём поворот поменьше: свет похожее
-      all2.push({ a, score, good: good / pts.length });
+      // насколько повёрнутый источник совпадает с кольцом вокруг места
+      let fit = 0, nf = 0;
+      for (const [[x, y], L0] of ring) {
+        const [qx, qy] = rot(x, y), L = at(qx, qy);
+        if (L == null) continue;
+        fit += Math.abs(L - L0); nf++;
+      }
+      cand.push({ a, good: good / pts.length, odd: odd / pts.length, fit: nf ? fit / nf : 99 });
     }
   }
-  // годные повороты по убыванию, соседние (ближе 30°) не повторяем: для вариантов
+  // годные: источник целиком на радужке и без ресниц, бликов и грязи;
+  // лучшие — что точнее ложатся на соседей
+  const ok = cand.filter((t) => t.good > 0.9 && t.odd < 0.03).sort((p, q) => p.odd - q.odd || p.fit - q.fit);
+  if (typeof window !== 'undefined' && window.__turnLog) console.log('[g]', JSON.stringify(cand.slice().sort((p, q) => p.odd - q.odd).slice(0, 6).map((t) => [Math.round(t.a * 57.3), +t.odd.toFixed(3), +t.good.toFixed(2), +t.fit.toFixed(1)])));
   const out = [];
-  for (const t of all2.filter((t) => t.good > 0.92).sort((p, q) => q.score - p.score)) {
-    if (out.every((a) => Math.abs(a - t.a) > Math.PI / 6 + 1e-6)) out.push(t.a);
-  }
+  for (const t of ok) if (out.every((a) => Math.abs(a - t.a) > Math.PI / 9)) out.push(t.a);
   return out;
+}
+
+// Блик вспышки окружён светлой дымкой. Если дымку не захватить, нейронка
+// продолжает её внутрь и место выходит белёсым. Расширяем маску по соседним
+// пикселям, которые светлее и серее окружающей радужки.
+export function growGlare(canvas, mask, region) {
+  const side = region.w, k = Math.min(1, 512 / side), n = Math.max(1, Math.round(side * k));
+  const c = makeCanvas(n, n), x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(canvas, region.x, region.y, side, side, 0, 0, n, n);
+  const d = x.getImageData(0, 0, n, n).data;
+  const mc = makeCanvas(n, n), mx = mc.getContext('2d', { willReadFrequently: true });
+  mx.drawImage(mask, 0, 0, side, side, 0, 0, n, n);
+  const md = mx.getImageData(0, 0, n, n).data;
+  const N = n * n, M = new Uint8Array(N), L = new Float32Array(N), Sa = new Float32Array(N), A = new Uint8Array(N);
+  let area = 0;
+  for (let i = 0; i < N; i++) {
+    const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+    L[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    const mxv = Math.max(r, g, b), mnv = Math.min(r, g, b);
+    Sa[i] = mxv ? (mxv - mnv) / mxv : 0;
+    A[i] = d[i * 4 + 3] > 128 ? 1 : 0;
+    M[i] = md[i * 4 + 3] > 20 ? 1 : 0;
+    area += M[i];
+  }
+  if (!area) return;
+  // радужка подальше от места — образец «как должно быть»
+  const far = dilate(M.map((v) => v * 255), n, Math.max(6, Math.round(Math.sqrt(area) * 0.6)));
+  const Ls = [], Ss = [];
+  for (let i = 0; i < N; i++) if (A[i] && !far[i]) { Ls.push(L[i]); Ss.push(Sa[i]); }
+  if (Ls.length < 50) return;
+  const med = (a) => a.sort((p, q) => p - q)[a.length >> 1];
+  const mL = med(Ls.slice()), mS = med(Ss.slice());
+  const madL = med(Ls.map((v) => Math.abs(v - mL))) + 1, madS = med(Ss.map((v) => Math.abs(v - mS))) + 0.01;
+  const veil = (i) => A[i] && L[i] > mL + 2 * madL && ((L[i] - mL) / madL + Math.max(0, (mS - Sa[i]) / madS)) > 4;
+  // растим от маски по дымке, но не дальше чем на размер самого места
+  const lim = Math.max(4, Math.round(Math.sqrt(area) * 0.7));
+  const dist = new Int32Array(N).fill(-1), q = [];
+  for (let i = 0; i < N; i++) if (M[i]) { dist[i] = 0; q.push(i); }
+  for (let h = 0; h < q.length; h++) {
+    const i = q[h], px = i % n, py = (i - px) / n;
+    if (dist[i] >= lim) continue;
+    for (const j of [px > 0 ? i - 1 : -1, px < n - 1 ? i + 1 : -1, py > 0 ? i - n : -1, py < n - 1 ? i + n : -1]) {
+      if (j < 0 || dist[j] >= 0 || !veil(j)) continue;
+      dist[j] = dist[i] + 1; q.push(j);
+    }
+  }
+  let G = new Uint8Array(N);
+  for (let i = 0; i < N; i++) G[i] = dist[i] >= 0 ? 255 : 0;
+  G = dilate(G, n, 2);                                       // и чуть-чуть с запасом
+  const out = mx.createImageData(n, n);
+  for (let i = 0; i < N; i++) { out.data[i * 4] = out.data[i * 4 + 1] = out.data[i * 4 + 2] = 255; out.data[i * 4 + 3] = G[i]; }
+  mx.putImageData(out, 0, 0);
+  const m2 = mask.getContext('2d');
+  m2.save();
+  m2.imageSmoothingEnabled = true;
+  m2.drawImage(mc, 0, 0, n, n, 0, 0, side, side);
+  m2.restore();
+}
+
+// Заплатка бывает чуть серее или светлее соседей (нейронка тянет остатки блика).
+// Подгоняем её цвет: у края места изнутри он должен совпадать с радужкой снаружи.
+function matchTone(canvas, mask, region, patch) {
+  const side = region.w, n = Math.min(side, 256), k = n / side;
+  const g = (src, sx, sy, sw, sh) => { const c = makeCanvas(n, n), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(src, sx, sy, sw, sh, 0, 0, n, n); return x.getImageData(0, 0, n, n).data; };
+  const orig = g(canvas, region.x, region.y, side, side), pt = g(patch, 0, 0, side, side), md = g(mask, 0, 0, side, side);
+  const N = n * n, M = new Uint8Array(N);
+  for (let i = 0; i < N; i++) M[i] = md[i * 4 + 3] > 60 ? 255 : 0;
+  const r = Math.max(2, Math.round(Math.max(6, side / 40) * k));
+  const out = dilate(M, n, r), inv = new Uint8Array(N);
+  for (let i = 0; i < N; i++) inv[i] = M[i] ? 0 : 255;
+  const inEdge = dilate(inv, n, r);
+  const A = [[], [], []], B = [[], [], []];
+  for (let i = 0; i < N; i++) {
+    if (out[i] && !M[i] && orig[i * 4 + 3] > 200) for (let c = 0; c < 3; c++) A[c].push(orig[i * 4 + c]);
+    if (M[i] && inEdge[i]) for (let c = 0; c < 3; c++) B[c].push(pt[i * 4 + c]);
+  }
+  if (A[0].length < 30 || B[0].length < 30) return;
+  const med = (a) => a.sort((p, q) => p - q)[a.length >> 1];
+  const off = [0, 1, 2].map((c) => med(A[c]) - med(B[c]));
+  if (Math.max(...off.map(Math.abs)) < 1.5) return;
+  const x = patch.getContext('2d', { willReadFrequently: true }), img = x.getImageData(0, 0, side, side), d = img.data;
+  for (let i = 0; i < d.length; i += 4) for (let c = 0; c < 3; c++) d[i + c] = d[i + c] + off[c];
+  x.putImageData(img, 0, 0);
 }
 
 // Расширение маски на r точек (квадратом, этого хватает)
@@ -545,6 +660,7 @@ export async function makePatch(canvas, mask, region, run, under, iris, variant 
       patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, (side / N) * 3)));
     }
   }
+  matchTone(canvas, mask, region, patch);
   // Вклеиваем только закрашенное место, край заплатки размыт, чтобы не было шва.
   const px = patch.getContext('2d');
   const soft = makeCanvas(side, side);

@@ -836,6 +836,7 @@ async function neuralRemove(l, paint, box) {
   const mask = im.makeCanvas(region.w, region.h), mx = mask.getContext('2d');
   mx.translate(-region.x, -region.y);
   paint(mx, (c) => { c.translate(-region.x, -region.y); D.docToLayerTransform(c, l); }, pad);
+  im.growGlare(l.canvas, mask, region);   // светлая дымка вокруг блика — тоже убираем
   const before = l.canvas.getContext('2d').getImageData(region.x, region.y, region.w, region.h);
   S.variants = null; // прошлые варианты больше не нужны, их фоновый расчёт остановится
   await setBusy('Убираю лишнее');

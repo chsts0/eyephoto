@@ -8,32 +8,52 @@ const fsp = require('node:fs/promises');
 const { net } = require('electron');
 
 const SIZE = 512;
-const MODEL_FILE = 'lama_fp32.onnx';
-const MODEL_BYTES = 208044816;
-const MODEL_URLS = [
-  'https://github.com/chsts0/eyephoto/releases/download/models-v1/lama_fp32.onnx',
-  'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',
-];
+// Две модели: стандартная LaMa и студийная — она же, дообученная на глазах студии.
+const MODELS = {
+  standard: {
+    file: 'lama_fp32.onnx', bytes: 208044816,
+    urls: [
+      'https://github.com/chsts0/eyephoto/releases/download/models-v1/lama_fp32.onnx',
+      'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',
+    ],
+  },
+  studio: {
+    file: 'eyes_lama.onnx', bytes: 206031121,
+    urls: ['https://github.com/chsts0/eyephoto/releases/download/models-v2/eyes_lama.onnx'],
+  },
+};
+let current = 'studio';
 
 let session = null;
-let downloading = null;
+const downloading = {};
 
-const modelPath = (userData) =>
-  process.env.EYEPHOTO_MODEL || path.join(userData, 'models', MODEL_FILE);
+const modelPath = (userData, name = current) =>
+  process.env.EYEPHOTO_MODEL || path.join(userData, 'models', MODELS[name].file);
 
-async function status(userData) {
+async function has(userData, name = current) {
   try {
-    const st = await fsp.stat(modelPath(userData));
-    return { ready: st.size === MODEL_BYTES || !!process.env.EYEPHOTO_MODEL };
+    const st = await fsp.stat(modelPath(userData, name));
+    return st.size === MODELS[name].bytes || !!process.env.EYEPHOTO_MODEL;
   } catch {
-    return { ready: false };
+    return false;
   }
 }
 
-async function fetchTo(url, file, onProgress) {
+async function status(userData) {
+  return { ready: await has(userData), model: current };
+}
+
+function setModel(name) {
+  if (!MODELS[name] || name === current) return;
+  current = name;
+  session = null;
+}
+const getModel = () => current;
+
+async function fetchTo(url, file, onProgress, bytes) {
   const res = await net.fetch(url);
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-  const total = Number(res.headers.get('content-length')) || MODEL_BYTES;
+  const total = Number(res.headers.get('content-length')) || bytes;
   const out = fs.createWriteStream(file);
   let got = 0, last = -1;
   try {
@@ -46,19 +66,20 @@ async function fetchTo(url, file, onProgress) {
   } finally {
     await new Promise((r) => out.end(r));
   }
-  if (got !== MODEL_BYTES) throw new Error('файл скачался не полностью');
+  if (got !== bytes) throw new Error('файл скачался не полностью');
 }
 
-function download(userData, onProgress) {
-  if (downloading) return downloading;
-  downloading = (async () => {
-    const file = modelPath(userData);
+function download(userData, onProgress, name = current) {
+  if (downloading[name]) return downloading[name];
+  const m = MODELS[name];
+  downloading[name] = (async () => {
+    const file = modelPath(userData, name);
     const tmp = file + '.part';
     await fsp.mkdir(path.dirname(file), { recursive: true });
     let lastError;
-    for (const url of MODEL_URLS) {
+    for (const url of m.urls) {
       try {
-        await fetchTo(url, tmp, onProgress);
+        await fetchTo(url, tmp, onProgress, m.bytes);
         await fsp.rename(tmp, file);
         return { ok: true };
       } catch (e) {
@@ -67,8 +88,8 @@ function download(userData, onProgress) {
       }
     }
     return { ok: false, message: String(lastError && lastError.message) };
-  })().finally(() => { downloading = null; });
-  return downloading;
+  })().finally(() => { delete downloading[name]; });
+  return downloading[name];
 }
 
 // На винде пробуем видеокарту (DirectML): на игровых ноутах это в разы быстрее.
@@ -176,4 +197,4 @@ async function remove(userData) {
   await fsp.rm(modelPath(userData), { force: true });
 }
 
-module.exports = { status, download, run, warm, setCpu, remove, SIZE };
+module.exports = { status, has, download, run, warm, setCpu, remove, setModel, getModel, SIZE };

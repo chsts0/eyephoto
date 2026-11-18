@@ -477,10 +477,29 @@ ipcMain.handle('assistant-ask', (e, { id, question }) => assistant.ask(app.getPa
 ipcMain.handle('set-zoom', (_e, f) => { if (win && f >= 0.7 && f <= 1.6) win.webContents.setZoomFactor(f); });
 ipcMain.handle('set-neural-device', (_e, cpu) => inpaint.setCpu(!!cpu));
 ipcMain.handle('model-remove', () => inpaint.remove(app.getPath('userData')));
+// выбор нейронки: студийная (дообученная на глазах студии) или стандартная
+ipcMain.handle('set-neural-model', (_e, name) => { inpaint.setModel(name); inpaint.warm(app.getPath('userData')); return inpaint.status(app.getPath('userData')); });
 
-app.whenReady().then(() => {
+// Студийной ещё нет, а стандартная скачана (обновились со старой версии):
+// работаем на стандартной и тихо докачиваем студийную, потом переключаемся.
+async function upgradeModel(pr) {
+  const ud = app.getPath('userData');
+  const want = pr.neuralModel || 'studio';
+  if (want !== 'studio' || await inpaint.has(ud, 'studio')) return;
+  if (!(await inpaint.has(ud, 'standard'))) return;   // первый запуск: скачается обычным окном
+  const res = await inpaint.download(ud, () => {}, 'studio');
+  if (res.ok) { inpaint.setModel('studio'); inpaint.warm(ud); send('model-upgraded', 'studio'); }
+}
+
+app.whenReady().then(async () => {
   serveApp();
+  // какая нейронка — решаем до открытия окна, чтобы окно сразу видело верное состояние
+  const pr0 = (await loadSettings()).prefs || {};
+  const ud = app.getPath('userData');
+  inpaint.setModel(pr0.neuralModel === 'standard' ? 'standard' : 'studio');
+  if (pr0.neuralModel !== 'standard' && !(await inpaint.has(ud, 'studio')) && await inpaint.has(ud, 'standard')) inpaint.setModel('standard');
   createWindow();
+  upgradeModel(pr0);
   win.webContents.once('did-finish-load', async () => {
     const st = await loadSettings();
     const pr = st.prefs || {};

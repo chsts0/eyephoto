@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('eyephoto', {
   inpaint: (payload) => ipcRenderer.invoke('inpaint', payload),
 
   sendFeedback: (m) => ipcRenderer.invoke('feedback-send', m),
+  setNeuralModel: (name) => ipcRenderer.invoke('set-neural-model', name),
+  onModelUpgraded: on('model-upgraded'),
   checkUpdate: () => ipcRenderer.invoke('update-check'),
   installUpdate: () => ipcRenderer.invoke('update-install'),
   openReleases: () => ipcRenderer.invoke('open-releases'),

@@ -24,7 +24,7 @@ const S = {
   cur: null,          // открытый документ
   tool: 'move',
   pupilSoft: 100,     // мягкость края зрачка после сужения, % от студийной
-  prefs: { preciseCursors: false, brushCross: true, units: 'mm', shiftSwitch: true, wheelZoom: false, variants: 3, history: 60, jpegQuality: 97, neuralCpu: false, autoUpdate: true, uiScale: 1 }, // настройки из окна «Настройки»
+  prefs: { preciseCursors: false, brushCross: true, units: 'mm', shiftSwitch: true, wheelZoom: false, variants: 3, history: 60, jpegQuality: 97, neuralCpu: false, neuralModel: 'studio', autoUpdate: true, uiScale: 1 }, // настройки из окна «Настройки»
   opts: {
     move: { auto: true },
     marquee: { center: true, shape: 'circle', feather: 8 },
@@ -3591,9 +3591,10 @@ function showSettings(start) {
       pref('wheelZoom', 'Масштаб колесом мыши', 'toggle', { hint: 'Колесо приближает, с Alt листает', words: 'прокрутка зум' }),
     ] },
     { id: 'neural', title: 'Нейронка', items: [
+      pref('neuralModel', 'Какая нейронка', 'select', { hint: 'Студийная дообучена на глазах студии и дорисовывает радужку точнее. Стандартная: исходная, как раньше', words: 'модель студийная стандартная обученная', options: [['studio', 'Студийная'], ['standard', 'Стандартная']], set: async (v) => { setPref('neuralModel', v); const st = await api.setNeuralModel(v); S.modelReady = st.ready; if (!st.ready) await ensureModel(); } }),
       pref('variants', 'Вариантов сразу', 'select', { hint: 'Один считается быстрее, три как в фотошопе', words: 'варианты заплатка', options: [[3, '3'], [1, '1']] }),
       pref('neuralCpu', 'Считать на процессоре', 'toggle', { hint: 'Включите, если на видеокарте нейронка ошибается или вылетает', words: 'видеокарта gpu', set: (v) => { setPref('neuralCpu', v); api.setNeuralDevice(v); } }),
-      { label: 'Файл нейронки', type: 'info', get: async () => ((await api.modelStatus()).ready ? 'скачан, 200 МБ' : 'не скачан') },
+      { label: 'Файл нейронки', type: 'info', get: async () => { const st = await api.modelStatus(); return (st.model === 'standard' ? 'стандартная' : 'студийная') + (st.ready ? ', скачана' : ', не скачана'); } },
       { label: 'Скачать нейронку заново', hint: 'Если работает странно или файл повреждён', type: 'button', button: 'Скачать', after: true, run: async () => { await api.modelRemove(); S.modelReady = false; await ensureModel(); } },
     ] },
     { id: 'pupil', title: 'Зрачок', items: [
@@ -3636,6 +3637,7 @@ api.onUpdateStatus((s) => {
 });
 
 api.version().then((v) => { $('version').textContent = v; });
+api.onModelUpgraded(() => { S.modelReady = true; ui.toast('Нейронка обновилась: теперь студийная, обученная на глазах студии'); });
 // первый запуск: сразу предлагаем скачать нейронку, чтобы потом не ждать посреди работы
 api.modelStatus().then((s) => { S.modelReady = s.ready; if (!s.ready) setTimeout(ensureModel, 600); });
 loadTemplateList();

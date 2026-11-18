@@ -149,18 +149,42 @@ class EyeSet(torch.utils.data.Dataset):
             valid = cv2.warpAffine(valid, M, (S, S), flags=cv2.INTER_NEAREST, borderValue=0)
             if rng.random() < 0.5:
                 img, valid = img[:, ::-1], valid[:, ::-1]
-            # размер пятна и окно вокруг него, как программа отдаёт место модели:
-            # окно в 2,3 раза больше пятна, но не меньше трети глаза
-            size = rng.uniform(0.04, 0.35) * S
-            win = int(min(S, max(S * 0.33, size * 2.3)))
-            x0 = rng.randint(0, S - win)
-            y0 = rng.randint(0, S - win)
-            v = valid[y0:y0 + win, x0:x0 + win] > 127
-            if v.mean() < 0.6:
-                continue
-            m = GlareMasks(rng)(win, size) > 127
-            if m.sum() < 30 or (m & ~v).sum() > 0.1 * m.sum():
-                continue                                   # пятно должно лежать на радужке
+            R = S / 2 / 1.04                               # радиус радужки в кадре сборщика
+            if rng.random() < 0.22:
+                # веко или ресницы закрыли край радужки: серп до трети глаза, окно — весь глаз
+                win, x0, y0 = S, 0, 0
+                v = valid > 127
+                yy, xx = np.mgrid[0:S, 0:S]
+                ang = rng.uniform(0, 2 * math.pi)
+                depth = rng.uniform(0.08, 0.55) * R          # насколько веко наползло
+                Rl = rng.uniform(1.4, 3.5) * R               # кривизна века
+                lx = S / 2 + math.cos(ang) * (R + Rl - depth)
+                ly = S / 2 + math.sin(ang) * (R + Rl - depth)
+                m = ((xx - lx) ** 2 + (yy - ly) ** 2 < Rl ** 2) & ((xx - S / 2) ** 2 + (yy - S / 2) ** 2 < (R * 0.99) ** 2)
+                if rng.random() < 0.5:                       # поверх века ещё блик или ресницы
+                    m |= GlareMasks(rng)(S, rng.uniform(0.08, 0.25) * S) > 127
+                m = cv2.dilate(m.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+                if m.sum() < 30 or v.mean() < 0.4 or (m & ~v).sum() > 0.25 * m.sum():
+                    continue
+            else:
+                # размер пятна и окно вокруг него, как программа отдаёт место модели:
+                # окно в 2,3 раза больше пятна, но не меньше трети глаза.
+                # Чаще всего пятно у края радужки (блик вспышки, ресницы)
+                size = rng.uniform(0.04, 0.35) * S
+                win = int(min(S, max(S * 0.33, size * 2.3)))
+                if rng.random() < 0.6:
+                    a_, r_ = rng.uniform(0, 2 * math.pi), rng.uniform(0.55, 0.92) * R
+                    sx, sy = S / 2 + math.cos(a_) * r_, S / 2 + math.sin(a_) * r_
+                    x0 = int(min(max(0, sx - win / 2), S - win)); y0 = int(min(max(0, sy - win / 2), S - win))
+                else:
+                    x0 = rng.randint(0, S - win)
+                    y0 = rng.randint(0, S - win)
+                v = valid[y0:y0 + win, x0:x0 + win] > 127
+                if v.mean() < 0.5:
+                    continue
+                m = GlareMasks(rng)(win, size) > 127
+                if m.sum() < 30 or (m & ~v).sum() > 0.1 * m.sum():
+                    continue                                   # пятно должно лежать на радужке
             crop = np.ascontiguousarray(img[y0:y0 + win, x0:x0 + win])
             crop = cv2.resize(crop, (N, N), interpolation=cv2.INTER_AREA if win > N else cv2.INTER_CUBIC)
             m = cv2.resize(m.astype(np.uint8), (N, N), interpolation=cv2.INTER_NEAREST)
@@ -299,6 +323,8 @@ def main():
     ap.add_argument('--warmup', type=int, default=600, help='шагов разогрева дискриминатора')
     ap.add_argument('--eval-every', type=int, default=1000)
     ap.add_argument('--resume', action='store_true')
+    ap.add_argument('--init', default='', help='начать с весов генератора (best_gen.pt прошлого обучения)')
+    ap.add_argument('--ema', type=float, default=0.999, help='сглаженная копия весов, 0 — без неё')
     ap.add_argument('--amp', action='store_true', help='половинная точность: быстрее, но на T4 big-lama в ней уходит в nan')
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--cache', default=os.path.expanduser('~/.cache/eyephoto'))
@@ -326,7 +352,17 @@ def main():
     train = torch.utils.data.DataLoader(EyeSet(train_items), batch_size=a.batch, num_workers=a.workers, drop_last=True, pin_memory=dev.type == 'cuda', persistent_workers=a.workers > 0)
     val = torch.utils.data.DataLoader(EyeSet(val_items, seed=1, length=min(96, n_val * 8)), batch_size=1)
 
+    if a.init and os.path.exists(a.init):
+        gen.load_state_dict(torch.load(a.init, map_location='cpu', weights_only=True))
+        print('Начинаю с весов', a.init, flush=True)
     net = Inpainter(gen)
+    # сглаженная копия генератора: её проверяем и выгружаем, она чище и стабильнее
+    import copy
+    ema_gen = copy.deepcopy(gen).eval() if a.ema > 0 else None
+    if ema_gen is not None:
+        for p_ in ema_gen.parameters():
+            p_.requires_grad_(False)
+    ema_net = Inpainter(ema_gen) if ema_gen is not None else net
     disc = Discriminator().to(dev)
     vgg = VGGLoss().to(dev)
     opt_g = torch.optim.Adam(gen.parameters(), lr=a.lr, betas=(0.5, 0.999))
@@ -368,6 +404,10 @@ def main():
             x, m, v = next(it)
         x, m, v = x.to(dev, non_blocking=True), m.to(dev, non_blocking=True), v.to(dev, non_blocking=True)
         warm = step < a.warmup
+        # скорость обучения плавно падает к концу до 10%: без этого модель топчется на месте
+        prog = min(1.0, (step / a.steps) if a.steps else (time.time() - t0) / max(1, deadline - t0))
+        for g_ in opt_g.param_groups:
+            g_['lr'] = a.lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog)))
 
         with torch.autocast(dev.type, enabled=use_amp, dtype=torch.float16):
             y = net(x, m)
@@ -426,17 +466,24 @@ def main():
             torch.nn.utils.clip_grad_norm_(gen.parameters(), 1.0)
             scaler.step(opt_g)
             scaler.update()
+            if ema_gen is not None:
+                with torch.no_grad():
+                    for pe, pg in zip(ema_gen.parameters(), gen.parameters()):
+                        pe.mul_(a.ema).add_(pg.detach(), alpha=1 - a.ema)
+                    for be, bg in zip(ema_gen.buffers(), gen.buffers()):
+                        be.copy_(bg)
 
         step += 1
         if step % 50 == 0:
             el = time.time() - t0
             print(f'шаг {step}  D {loss_d.item():.3f}  G {loss_g.item():.3f}  {el / 60:.0f} мин' + ('  (разогрев)' if warm else ''), flush=True)
         if step % a.eval_every == 0 and not warm:
-            l1, pl = evaluate(net, base, vgg, val, dev, os.path.join(a.out, 'samples'), f'{step:06d}')
+            l1, pl = evaluate(ema_net, base, vgg, val, dev, os.path.join(a.out, 'samples'), f'{step:06d}')
+            ema_net.eval()
             note = ''
             if best is None or pl < best:
                 best = pl
-                torch.save(gen.state_dict(), os.path.join(a.out, 'best_gen.pt'))
+                torch.save((ema_gen or gen).state_dict(), os.path.join(a.out, 'best_gen.pt'))
                 note = 'лучшая'
             print(f'Проверка на шаге {step}: в пятне {l1:.4f}, перцептивная {pl:.4f} {note}', flush=True)
             with open(os.path.join(a.out, 'log.csv'), 'a', newline='') as f:

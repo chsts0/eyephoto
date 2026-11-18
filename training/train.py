@@ -80,6 +80,10 @@ def read(path, flag=cv2.IMREAD_COLOR):
     return cv2.imdecode(np.fromfile(path, np.uint8), flag)
 
 
+# зрачок: радиус в долях радиуса радужки (с запасом, зрачки бывают шире)
+PUPIL_R = 0.33
+
+
 class GlareMasks:
     """Маски как на снимках студии: прямоугольные блики от софтбоксов, круглые
     точки, дуги кольцевого света, ресницы, произвольные обводки лассо."""
@@ -163,6 +167,7 @@ class EyeSet(torch.utils.data.Dataset):
                 m = ((xx - lx) ** 2 + (yy - ly) ** 2 < Rl ** 2) & ((xx - S / 2) ** 2 + (yy - S / 2) ** 2 < (R * 0.99) ** 2)
                 if rng.random() < 0.5:                       # поверх века ещё блик или ресницы
                     m |= GlareMasks(rng)(S, rng.uniform(0.08, 0.25) * S) > 127
+                m &= (xx - S / 2) ** 2 + (yy - S / 2) ** 2 >= (R * PUPIL_R) ** 2   # не на зрачке
                 m = cv2.dilate(m.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
                 if m.sum() < 30 or v.mean() < 0.4 or (m & ~v).sum() > 0.25 * m.sum():
                     continue
@@ -185,6 +190,10 @@ class EyeSet(torch.utils.data.Dataset):
                 m = GlareMasks(rng)(win, size) > 127
                 if m.sum() < 30 or (m & ~v).sum() > 0.1 * m.sum():
                     continue                                   # пятно должно лежать на радужке
+                # на зрачке пятна не нужны: он всё равно закрашивается чёрным
+                yy_, xx_ = np.mgrid[y0:y0 + win, x0:x0 + win]
+                if (m & ((xx_ - S / 2) ** 2 + (yy_ - S / 2) ** 2 < (R * PUPIL_R) ** 2)).sum() > 0.15 * m.sum():
+                    continue
             crop = np.ascontiguousarray(img[y0:y0 + win, x0:x0 + win])
             crop = cv2.resize(crop, (N, N), interpolation=cv2.INTER_AREA if win > N else cv2.INTER_CUBIC)
             m = cv2.resize(m.astype(np.uint8), (N, N), interpolation=cv2.INTER_NEAREST)

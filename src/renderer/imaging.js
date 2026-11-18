@@ -485,19 +485,26 @@ function detailFromTurn(canvas, region, lamaUp, iris, angle, sigma) {
   return out;
 }
 
-// Варианты как в фотошопе: модель на одном и том же входе всегда отвечает одинаково,
-// поэтому каждый вариант получает место по-своему: как есть, отражённым
-// по горизонтали, отражённым по вертикали. Мелкий рисунок на больших местах берётся
-// с разных поворотов. Считается по копии слоя, сам слой не трогается.
+// Варианты как в фотошопе. Модель на одном и том же входе всегда отвечает одинаково,
+// а отражение для неё почти ничего не меняет (на небольших местах три варианта
+// выходили одинаковыми). Поэтому каждый вариант получает место по-настоящему по-другому:
+//   0 — как есть;
+//   1 — то же, но мелкий рисунок берётся с другого места радужки (поворотом вокруг зрачка);
+//   2 — модель видит место с большим запасом вокруг, плюс рисунок с третьего места;
+// дальше по кругу, с отражением и чуть шире место. Считается по копии слоя.
 export const VARIANTS = 3;
 const FLIPS = [null, 'h', 'v', 'hv'];
 
 export async function makePatch(canvas, mask, region, run, under, iris, variant = 0) {
   const N = 512, side = region.w;
+  const kind = variant % 3, round = Math.floor(variant / 3);
+  // запас вокруг: модель видит больше соседней радужки и дорисовывает иначе
+  const zoom = kind === 2 && !under ? 1.6 : 1;
+  const side2 = Math.round(side * zoom), off = (side2 - side) / 2;
   const small = makeCanvas(N, N);
   const sx = small.getContext('2d', { willReadFrequently: true });
   sx.imageSmoothingQuality = 'high';
-  sx.drawImage(canvas, region.x, region.y, side, side, 0, 0, N, N);
+  sx.drawImage(canvas, region.x - off, region.y - off, side2, side2, 0, 0, N, N);
   const alpha = sx.getImageData(0, 0, N, N).data;
   sx.globalCompositeOperation = 'destination-over';
   if (under) under(sx, N);
@@ -508,36 +515,37 @@ export async function makePatch(canvas, mask, region, run, under, iris, variant 
 
   const sm = makeCanvas(N, N);
   const mx = sm.getContext('2d', { willReadFrequently: true });
-  mx.drawImage(mask, 0, 0, side, side, 0, 0, N, N);
+  const kk = N / side2;
+  mx.drawImage(mask, 0, 0, side, side, off * kk, off * kk, side * kk, side * kk);
   const md = mx.getImageData(0, 0, N, N).data;
   let m = new Uint8Array(N * N);
   for (let i = 0; i < m.length; i++) m[i] = md[i * 4 + 3] > 20 || (!under && alpha[i * 4 + 3] < 128) ? 255 : 0;
 
-  // «ещё варианты»: дальше по кругу те же отражения, но место чуть шире,
-  // модель видит другой край и дорисовывает иначе
-  const grow = Math.floor(variant / FLIPS.length) * 3;
+  // «ещё варианты»: следующие круги с отражением и чуть шире местом
+  const grow = round * 3;
   if (grow) m = dilate(m, N, grow);
-  const flip = FLIPS[variant % FLIPS.length];
+  const flip = FLIPS[round % FLIPS.length];
   const fl = (a, ch) => { for (const f of flip || '') a = flipSquare(a, N, ch, f); return a; };
   if (flip) { rgba = fl(rgba, 4); m = fl(m, 1); }
   let out = new Uint8Array(await run(rgba, m));
   if (flip) out = fl(out, 4);
   sx.putImageData(new ImageData(new Uint8ClampedArray(out.buffer), N, N), 0, 0);
 
-  // Вклеиваем только закрашенное место, край заплатки размыт, чтобы не было шва.
   let patch = makeCanvas(side, side);
   const px0 = patch.getContext('2d', { willReadFrequently: true });
   px0.imageSmoothingQuality = 'high';
-  px0.drawImage(small, 0, 0, side, side);
-  // большое место: нейронка видела его уменьшенным, возвращаем мелкий рисунок
-  const f = side / N;
-  if (iris && f > 1.25) {
+  px0.drawImage(small, off * kk, off * kk, side * kk, side * kk, 0, 0, side, side);
+  // мелкий рисунок с другого места радужки: на больших местах всегда (нейронка видела
+  // их уменьшенными), на маленьких — у вариантов 1 и 2, чтобы они правда отличались
+  const f = side2 / N;
+  if (iris && (f > 1.25 || kind > 0)) {
     const turns = chooseTurn(canvas, mask, region, iris);
     if (turns && turns.length) {
-      const angle = turns[variant % turns.length];
-      patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, f * 3)));
+      const angle = turns[(f > 1.25 ? variant : kind - 1 + round) % turns.length];
+      patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, (side / N) * 3)));
     }
   }
+  // Вклеиваем только закрашенное место, край заплатки размыт, чтобы не было шва.
   const px = patch.getContext('2d');
   const soft = makeCanvas(side, side);
   const fx = soft.getContext('2d');

@@ -503,7 +503,7 @@ body.mac .optbar > * { -webkit-app-region: no-drag; }
 .mode-switch button { height: 22px; padding: 0 12px; border: 0; border-radius: 7px; background: none; color: var(--dim); white-space: nowrap; }
 .mode-switch button.on { background: var(--sel-2); color: var(--hi); }
 .optbar .mode-switch { height: 28px; align-items: center; }
-.dspace { display: none; grid-row: 3; grid-column: 1 / -1; min-height: 0; grid-template: "gal view side" 1fr "gal foot side" auto / 300px 1fr 260px; gap: 6px; }
+.dspace { display: none; grid-row: tools-start / tools-end; grid-column: tools-start / dock-end; min-height: 0; grid-template: "gal view side" 1fr "gal foot side" auto / 300px 1fr 260px; gap: 6px; }
 body.designs .dspace { display: grid; }
 body.designs .tools, body.designs .center, body.designs .dock { display: none; }
 body.designs .optbar > :not(.menubar-right) { display: none; }

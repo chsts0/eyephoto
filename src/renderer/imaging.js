@@ -363,9 +363,14 @@ export function shrinkPupil(canvas, pupil, R, ratio = PUPIL_RATIO, soft = 1) {
 // mask: холст размером с region; непрозрачные пиксели = что убрать.
 // run(rgba, mask512) вызывает модель.
 
+// Настройки заплатки (меняются только на стенде проверки)
+// always: мелкий рисунок досыпаем всегда, не только на больших местах (нейронка мылит и на маленьких);
+// gain и sigmaK подобраны на снимке студии: резкость заплатки как у радужки вокруг
+export const TUNE = { ctx: 2.3, sigmaK: 4, sigmaMax: 14, gain: 1.25, always: true };
+
 export function patchRegion(canvas, bbox) {
   const W = canvas.width, H = canvas.height;
-  const need = Math.max(512, Math.max(bbox.w, bbox.h) * 2.3);
+  const need = Math.max(512, Math.max(bbox.w, bbox.h) * TUNE.ctx);
   const side = Math.round(Math.min(need, W, H));
   const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
   const x = Math.round(Math.max(0, Math.min(W - side, cx - side / 2)));
@@ -593,7 +598,7 @@ function detailFromTurn(canvas, region, lamaUp, iris, angle, sigma) {
   const out = makeCanvas(side, side), ox = out.getContext('2d');
   const img = ox.createImageData(side, side), o = img.data;
   for (let i = 0; i < o.length; i += 4) {
-    for (let c = 0; c < 3; c++) o[i + c] = Lb[i + c] + (S[i + 3] > 0 ? S[i + c] - Sb[i + c] : 0);
+    for (let c = 0; c < 3; c++) o[i + c] = Lb[i + c] + (S[i + 3] > 0 ? (S[i + c] - Sb[i + c]) * TUNE.gain : 0);
     o[i + 3] = 255;
   }
   ox.putImageData(img, 0, 0);
@@ -653,11 +658,11 @@ export async function makePatch(canvas, mask, region, run, under, iris, variant 
   // мелкий рисунок с другого места радужки: на больших местах всегда (нейронка видела
   // их уменьшенными), на маленьких — у вариантов 1 и 2, чтобы они правда отличались
   const f = side2 / N;
-  if (iris && (f > 1.25 || kind > 0)) {
+  if (iris && (f > 1.25 || kind > 0 || TUNE.always)) {
     const turns = chooseTurn(canvas, mask, region, iris);
     if (turns && turns.length) {
-      const angle = turns[(f > 1.25 ? variant : kind - 1 + round) % turns.length];
-      patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(10, Math.max(3, (side / N) * 3)));
+      const angle = turns[(f > 1.25 || TUNE.always ? variant : kind - 1 + round) % turns.length];
+      patch = detailFromTurn(canvas, region, patch, iris, angle, Math.min(TUNE.sigmaMax, Math.max(3, (side / N) * TUNE.sigmaK)));
     }
   }
   matchTone(canvas, mask, region, patch);
